@@ -1,0 +1,19 @@
+venv/
+.venv/
+
+__pycache__/
+*.pyc
+
+data/
+
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+.zed/
+
+models/
+
+# Colab exports
+exports/*.zip

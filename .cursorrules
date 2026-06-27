@@ -1,0 +1,288 @@
+---
+description: 
+alwaysApply: true
+---
+
+# AXUM Rover — Cursor Rules
+# ============================================================
+# Read this entire file before suggesting any code.
+# Every decision here was made deliberately — do not change
+# architectural choices without flagging them explicitly.
+
+## WHAT THIS PROJECT IS
+
+AXUM is an autonomous museum-grade artefact triage and conservation
+robot built for WRO 2026 Future Innovators (theme: "Robots Meet Culture").
+It picks up cultural artefacts, scans them with multi-modal sensing,
+physically intervenes to preserve them, and produces a searchable catalogue.
+
+Competition deadline: mid-August 2026 (national selection, Ethiopia).
+Team size: 2 people. Build starts: early June 2026.
+
+---
+
+## HARDWARE — READ BEFORE TOUCHING ANY SERIAL/PIN CODE
+
+### Main compute
+- Arduino Mega 2560 — main MCU, all hardware control
+- ESP32-CAM (AI Thinker) — camera only, WiFi stream + trigger capture
+- Laptop (Windows 11, i7 13th Gen, 8GB RAM, no discrete GPU) — all AI/CV
+- STM32F411 Black Pill — co-processor for 12-bit ADC via I2C
+
+### Motors & motion
+- Drive: JGA25-370 DC gearmotor 12V 1:50 ×4, via L298N ×2
+  - Left:  ENA=44, IN1=7,  IN2=8
+  - Right: ENA=45, IN1=12, IN2=13
+  - Encoders: interrupt pins 18 (left), 19 (right)
+- Arm: EEZYbotARM MK2 style, 4-DOF + gripper
+  - S0 base=pin3(MG996R), S1 shoulder=pin4(MG996R)
+  - S2 elbow=pin6(MG90S), S3 wrist=pin9(SG90), S4 gripper=pin10(SG90)
+  - PCA9685 PWM driver handles all servos (eliminates jitter)
+- Turntable: 28BYJ-48 stepper + ULN2003, pins 22/23/24/25
+  - 2048 steps/rev (half-step), 36 photos at 10° increments
+
+### Camera & lighting
+- ESP32-CAM stream:   http://<IP>:81/stream
+- ESP32-CAM capture: http://<IP>/capture
+- Trigger pin: Arduino 30 → ESP32 GPIO 13
+- LED ring: WS2812B NeoPixel 12-LED, pin 11
+  - Split into 4 quadrants (N/E/S/W) for photometric stereo
+  - Each quadrant: 3 LEDs via IRF520N MOSFET
+  - Quadrant pins: 33(N), 34(E), 35(S), 36(W)
+
+### Sensors
+- HC-SR04 ultrasonic: front (trig=26, echo=27), side (trig=28, echo=29)
+- E18-D80NK IR proximity ×3: tray occupancy + arm home detection
+- Load cell 500g + HX711: turntable mass measurement
+- FSR 402 ×2: one per gripper finger (grip force)
+- MPU-6050 IMU: at wrist (mass + vibration)
+- Piezoelectric disc: spring-loaded hardness probe on arm tip
+- Micro peristaltic pump 5V: consolidant injection
+- Solenoid 5V 10mm: acoustic tap tester
+
+### Arm-tip hardware
+- FSR 402 ×2 (grip force per finger)
+- Micro-brush motor 3V DC (inscription cleaning)
+- Micro-syringe 0.3mm needle (consolidant injection via silicone tube)
+- Piezoelectric disc probe (hardness mapping)
+- RGB LED ×1 (status)
+- MPU-6050 IMU (mass + vibration)
+
+### Power
+- Rail A: 7.4V 2S LiPo → L298N → L298N 5V out → Arduino Vin
+- Rail B: 5V 3A USB power bank → servos + stepper + ESP32-CAM
+- NEVER mix servo and motor power rails
+- 1000µF 16V caps across each motor driver input
+- AMS1117-3.3 dedicated regulator for ESP32-CAM
+
+---
+
+## ARDUINO SERIAL PROTOCOL
+# All commands are ASCII strings terminated with newline.
+# Python sends → Arduino responds.
+
+PING              → PONG
+STOP              → OK:STOP
+STATUS            → JSON {front, side, enc_l, enc_r}
+DRIVE:<l>,<r>     → OK:DRIVE      (speed -255 to 255)
+ARM:<s0>,<s1>,<s2>,<s3> → OK:ARM (angles 0-180)
+GRIP:<angle>      → OK:GRIP       (0=closed, 160=open, slow movement)
+POSE:<name>       → OK:POSE       (named poses: HOME, PICK, PLACE, SCAN)
+STEP:<steps>      → OK:STEP       (turntable stepper)
+ROTATE:<degrees>  → OK:ROTATE     (turntable by degrees)
+PHOTO             → OK:PHOTO      (trigger ESP32-CAM capture)
+LED:<r>,<g>,<b>   → OK:LED
+LED:SCAN / LED:READY / LED:ERROR / LED:SUCCESS
+LED:QUAD:<N|E|S|W> → OK:LED:QUAD  (fire single NeoPixel quadrant)
+LED:OFF           → OK:LED:OFF
+TAP               → OK:TAP        (fire solenoid tapper)
+INJECT:<ul>       → OK:INJECT     (fire peristaltic pump, microlitres)
+PRESSURE          → PRESSURE:<value>
+IMPLANT           → OK:IMPLANT    (fire RFID plunger servo)
+
+# IMPORTANT: send_with_retry() in src/arm/controller.py handles
+# all serial communication. Never write raw serial.write() calls
+# in Python — always go through ArduinoSerial.send_command().
+
+---
+
+## PROJECT STRUCTURE
+
+AXUM/
+├── config.py               — all constants, paths, thresholds
+├── src/
+│   ├── arm/controller.py   — ArduinoSerial, ArmController,
+│   │                         TurntableController, CameraInterface
+│   ├── crack_detection/detector.py
+│   ├── object_detection/detector.py  — MobileNetV2 + YOLOv8
+│   ├── ocr/
+│   │   ├── model.py        — CNN+LSTM+CTC architecture
+│   │   ├── pipeline.py     — training, inference, dataset loader
+│   │   └── llm_restoration.py — Qwen2.5 via LM Studio/Ollama
+│   ├── imaging/
+│   │   ├── photometric_stereo.py  — 4-light depth reconstruction
+│   │   ├── multispectral.py       — UV/IR NDCI crack mapping
+│   │   └── salt_mapper.py         — UV fluorescence salt detection
+│   ├── sensing/
+│   │   ├── acoustic_tap.py        — solenoid tap + piezo void detection
+│   │   └── void_detector.py
+│   ├── analysis/
+│   │   ├── fragility_clock.py     — years-remaining prediction
+│   │   ├── inscription_fingerprint.py
+│   │   └── canonical_pose.py
+│   ├── intervention/
+│   │   ├── consolidant_injector.py
+│   │   ├── micro_cleaner.py
+│   │   └── fragment_reunification.py
+│   ├── audio/geez_speaker.py      — Ge'ez TTS
+│   ├── visualization/resurrection_wall.py
+│   ├── catalogue/generator.py     — PDF + JSON + QR cards
+│   └── pipeline/main_pipeline.py  — master state machine
+├── scripts/
+│   ├── train_ocr.py
+│   ├── train_classifier.py
+│   ├── train_yolov8.py
+│   ├── download_datasets.py
+│   └── extract_cached_dataset.py
+├── arduino/
+│   ├── axum_rover/axum_rover.ino
+│   └── esp32_cam/esp32_cam.ino
+└── data/
+    ├── geez_characters/    — HHD-Ethiopic dataset (downloading)
+    ├── artefact_classes/   — manual collection needed
+    └── scan_photos/
+
+---
+
+## PYTHON ENVIRONMENT
+
+- Python 3.12.10
+- Virtual environment: venv (always activate before running)
+- All runs from project root: C:\Users\Len\Documents\Programming\Projects\AXUM
+
+### Confirmed installed
+opencv-python, numpy, Pillow, matplotlib, torch (2.12.0+cpu),
+torchvision, scikit-learn, tqdm, albumentations, pyserial,
+flask, flask-socketio, requests, reportlab, qrcode, sqlalchemy,
+python-dotenv, loguru, pyttsx3, imutils, ultralytics (YOLOv8),
+datasets (4.8.5), huggingface_hub, pyarrow (24.0.0), scipy (1.13.1)
+
+### Not yet installed
+ollama, openai, intel-extension-for-pytorch, unsloth, trl,
+open3d, LM Studio (desktop app, not pip)
+
+### NO GPU — CPU only
+Do not suggest CUDA, .cuda(), .to('cuda'), or GPU-specific ops.
+All torch code must run on CPU.
+Use num_workers=0 in all DataLoaders (Windows multiprocessing issue).
+
+---
+
+## AI MODELS
+
+### Model 1: Ge'ez OCR
+- Architecture: CNN (feature extractor) + BiLSTM + CTC loss
+- Input: 32×128px grayscale
+- Output: Ge'ez character sequence
+- File: src/ocr/model.py (GeezOCRModel class)
+- Charset: 381 Ge'ez characters + BLANK + UNK = 383 tokens
+- Status: training pipeline ready, dataset downloading
+
+### Model 2: LLM Text Restoration
+- Model: Qwen2.5-1.5B (fine-tuned via Unsloth+QLoRA on Google Colab)
+- Inference: LM Studio (local) or Ollama fallback
+- Input: damaged Ge'ez text with [MISSING] tokens
+- Output: restored text + English translation
+- File: src/ocr/llm_restoration.py
+- Status: not yet fine-tuned
+
+### Model 3: Artefact Classifier
+- Architecture: MobileNetV2 (transfer learning)
+- Classes: pottery, stone_carving, coin, inscription_fragment, other
+- File: src/object_detection/detector.py (ArtefactClassifier class)
+- Status: not trained, no images collected yet
+
+### Model 4: YOLOv8 Nano
+- Used for artefact type ID after contour detection finds positions
+- File: src/object_detection/detector.py (YOLOArtefactClassifier)
+- Status: not trained, falls back to COCO pretrained
+
+### Model 5: Crack Detector
+- Pure OpenCV, no ML, no training needed
+- File: src/crack_detection/detector.py
+- Status: code written, not tested on real images
+
+---
+
+## CODING RULES — FOLLOW THESE ALWAYS
+
+1. Every function must have a docstring explaining WHAT it does,
+   WHY it exists, and WHAT the parameters mean. This is a
+   student project — clarity beats brevity.
+
+2. Use loguru for all logging: `from loguru import logger`
+   Never use print() for status messages in src/ modules.
+   print() is acceptable only in scripts/ and __main__ blocks.
+
+3. Import config constants, never hardcode values:
+   `from config import SCAN_PHOTOS_DIR, OCR_CONFIDENCE_MIN` etc.
+   If a value isn't in config.py yet, add it there first.
+
+4. All file paths use pathlib.Path, never raw strings.
+
+5. Never call serial.write() directly. Always use:
+   `arduino.send_command("COMMAND")` from ArduinoSerial.
+
+6. Hardware calls must be wrapped in try/except with graceful
+   fallback. The robot must degrade gracefully if a sensor fails,
+   not crash the entire mission.
+
+7. When writing new imaging/sensing modules, follow the pattern
+   in photometric_stereo.py:
+   - Section 1: data structures (@dataclass result type)
+   - Section 2: hardware capture functions
+   - Section 3: core math/processing
+   - Section 4: visualisation
+   - Section 5: main entry point (run_X() function)
+   - Section 6: calibration utility
+   - Section 7: standalone __main__ test with synthetic data
+
+8. Every new module must have a __main__ block that runs a
+   synthetic test WITHOUT requiring hardware. This lets the
+   team verify logic before the robot is built.
+
+9. torch DataLoaders: always num_workers=0 (Windows requirement).
+
+10. No GPU assumptions anywhere. No .cuda(), no .to('cuda').
+
+---
+
+## WHAT'S CURRENTLY BEING WORKED ON
+
+Dataset: HHD-Ethiopic downloading to data/hhd_raw/ via snapshot_download.
+After download: run scripts/extract_cached_dataset.py to convert to
+data/geez_characters/CHARACTER/image.png structure, then train_ocr.py.
+
+Next modules to write (in order):
+1. src/imaging/multispectral.py        ← NEXT
+2. src/imaging/salt_mapper.py
+3. src/sensing/acoustic_tap.py
+4. src/sensing/void_detector.py
+5. src/analysis/fragility_clock.py
+6. src/audio/geez_speaker.py
+7. src/visualization/resurrection_wall.py
+8. Dashboard UI (Tkinter)
+
+---
+
+## THINGS TO NEVER DO
+
+- Never suggest Raspberry Pi — too expensive in Ethiopia, not in the build
+- Never suggest CUDA or GPU acceleration — laptop has no discrete GPU
+- Never use rocker-bogie suspension — already decided on 4-wheel
+  passive differential (Leo Rover style)
+- Never use raw serial.write() — always ArduinoSerial.send_command()
+- Never hardcode file paths — always use config.py constants
+- Never use localStorage or browser storage in any web UI artifacts
+- Never suggest cloud inference — all AI runs locally on the laptop
+- Never use multiprocessing in DataLoaders (num_workers=0 always)

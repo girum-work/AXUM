@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AXUM Rover — Conservation Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:         #0a0c0f;
+    --surface:    #111318;
+    --border:     #1e2330;
+    --accent:     #c8963e;
+    --accent2:    #7b9e6b;
+    --text:       #e8dcc8;
+    --muted:      #6b7280;
+    --danger:     #c0392b;
+    --warning:    #d4820a;
+    --success:    #2e7d52;
+    --info:       #1a5276;
+    --crack:      #e74c3c;
+    --stress:     #e67e22;
+    --salt:       #f1c40f;
+    --inscription:#8e44ad;
+    --font-mono:  'Courier New', monospace;
+    --font-main:  'Segoe UI', system-ui, sans-serif;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-main);
+    font-size: 13px;
+    overflow: hidden;
+  }
+
+  /* ── Layout ───────────────────────────────────────────────── */
+  #app {
+    display: grid;
+    grid-template-rows: 48px 1fr 180px;
+    grid-template-columns: 1fr;
+    height: 100vh;
+    gap: 0;
+  }
+
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    z-index: 10;
+  }
+
+  #main {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    grid-template-rows: 1fr;
+    gap: 1px;
+    background: var(--border);
+    overflow: hidden;
+  }
+
+  #bottom {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Header ───────────────────────────────────────────────── */
+  .logo {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .logo span { color: var(--text); font-weight: 300; }
+
+  #status-badge {
+    padding: 4px 14px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    background: var(--surface);
+    border: 1px solid var(--muted);
+    color: var(--muted);
+    transition: all 0.3s;
+  }
+
+  #status-badge.scanning  { border-color: var(--accent);  color: var(--accent);  background: rgba(200,150,62,0.1); }
+  #status-badge.complete  { border-color: var(--success); color: #4caf7d;        background: rgba(46,125,82,0.1); }
+  #status-badge.error     { border-color: var(--danger);  color: #e57373;        background: rgba(192,57,43,0.1); }
+
+  .header-stats {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+  }
+
+  .stat { text-align: center; }
+  .stat-value { font-size: 20px; font-weight: 700; color: var(--accent); line-height: 1; }
+  .stat-label { font-size: 9px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+
+  /* ── Panels ───────────────────────────────────────────────── */
+  .panel {
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .panel-title {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .panel-body {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ── Camera Feed ──────────────────────────────────────────── */
+  #camera-panel { grid-row: 1; grid-column: 1; }
+
+  #camera-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    background: #050608;
+  }
+
+  #camera-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--muted);
+  }
+
+  .cam-icon {
+    width: 48px;
+    height: 48px;
+    border: 2px solid var(--border);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+
+  /* ── Sensing Grid ─────────────────────────────────────────── */
+  #sensing-panel { grid-row: 1; grid-column: 2; }
+
+  .sensing-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    height: 100%;
+  }
+
+  .sense-cell {
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 12px;
+    position: relative;
+    transition: background 0.4s;
+  }
+
+  .sense-cell.active { background: #0d1017; }
+
+  .sense-label {
+    font-size: 8px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .sense-value {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--text);
+    font-family: var(--font-mono);
+  }
+
+  .sense-value.low    { color: #4caf7d; }
+  .sense-value.medium { color: var(--warning); }
+  .sense-value.high   { color: var(--crack); }
+
+  .sense-bar {
+    width: 80%;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .sense-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+
+  .sense-img {
+    width: 100%;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 2px;
+    display: none;
+  }
+
+  .sense-img.visible { display: block; }
+
+  /* ── Triage Score ─────────────────────────────────────────── */
+  #triage-score {
+    font-size: 48px;
+    font-weight: 900;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    line-height: 1;
+  }
+
+  /* ── Inscription Panel ────────────────────────────────────── */
+  #inscription-panel {
+    padding: 16px;
+    overflow-y: auto;
+  }
+
+  .inscription-text {
+    font-size: 28px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    margin-bottom: 8px;
+    min-height: 40px;
+    font-family: 'Noto Serif Ethiopic', serif;
+    line-height: 1.4;
+  }
+
+  .inscription-translation {
+    font-size: 14px;
+    color: var(--text);
+    font-style: italic;
+    opacity: 0.8;
+    margin-bottom: 16px;
+    min-height: 20px;
+  }
+
+  .inscription-meta {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    padding: 3px 10px;
+    border-radius: 2px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .badge.known     { background: rgba(46,125,82,0.2);  border: 1px solid var(--success); color: #4caf7d; }
+  .badge.discovery { background: rgba(142,68,173,0.2); border: 1px solid var(--inscription); color: #c39bd3; animation: pulse 1s infinite; }
+  .badge.conf      { background: rgba(26,82,118,0.2);  border: 1px solid var(--info); color: #7fb3d3; }
+
+  /* ── Treatment Protocol ───────────────────────────────────── */
+  #treatment-panel {
+    padding: 10px 12px;
+    overflow-y: auto;
+    font-size: 11px;
+  }
+
+  .treatment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+    gap: 8px;
+  }
+
+  .treatment-substrate {
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  .treatment-substrate strong { color: var(--text); }
+
+  #treatment-urgency {
+    padding: 3px 8px;
+    border-radius: 2px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    border: 1px solid;
+  }
+
+  .treatment-section-title {
+    font-size: 8px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin: 8px 0 4px;
+    font-weight: 700;
+  }
+
+  .treatment-section-title.safe   { color: #4caf7d; }
+  .treatment-section-title.unsafe { color: var(--crack); }
+
+  .treatment-item {
+    padding: 5px 8px;
+    margin-bottom: 4px;
+    border-radius: 2px;
+    line-height: 1.35;
+  }
+
+  .treatment-item.safe {
+    background: rgba(46,125,82,0.08);
+    border-left: 3px solid #4caf7d;
+  }
+
+  .treatment-item.unsafe {
+    background: rgba(192,57,43,0.08);
+    border-left: 3px solid var(--crack);
+  }
+
+  .treatment-name { font-weight: 600; color: var(--text); }
+  .treatment-detail { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .treatment-risk { font-size: 9px; color: var(--crack); font-weight: 700; }
+
+  #treatment-empty {
+    color: var(--muted);
+    font-size: 10px;
+    text-align: center;
+    padding: 20px 0;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  /* ── Fragility Clock (inline in treatment header) ─────────── */
+  #fragility-years {
+    font-size: 22px;
+    font-weight: 900;
+    font-family: var(--font-mono);
+    color: var(--accent2);
+    line-height: 1;
+  }
+
+  #fragility-years.critical { color: var(--crack); }
+
+  .risk-factors {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .risk-factor {
+    font-size: 10px;
+    color: var(--warning);
+    padding: 2px 8px;
+    background: rgba(212,130,10,0.08);
+    border-left: 2px solid var(--warning);
+  }
+
+  /* ── Log Panel ────────────────────────────────────────────── */
+  #log-panel {
+    overflow-y: auto;
+    padding: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .log-entry {
+    display: flex;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 2px;
+    opacity: 0;
+    animation: fadeIn 0.3s forwards;
+  }
+
+  .log-time { color: var(--muted); flex-shrink: 0; }
+  .log-msg  { flex: 1; }
+
+  .log-entry.info    { color: var(--text); }
+  .log-entry.success { color: #4caf7d;  background: rgba(46,125,82,0.05); }
+  .log-entry.warning { color: #ffd180;  background: rgba(212,130,10,0.05); }
+  .log-entry.error   { color: #e57373;  background: rgba(192,57,43,0.08); }
+
+  /* ── Catalogue Strip ──────────────────────────────────────── */
+  #catalogue-strip {
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    overflow-x: auto;
+    align-items: center;
+    height: 100%;
+  }
+
+  .catalogue-card {
+    flex-shrink: 0;
+    width: 100px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    font-size: 9px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+    animation: slideIn 0.3s ease;
+  }
+
+  .catalogue-card:hover { border-color: var(--accent); }
+
+  .card-id    { color: var(--accent); font-weight: 700; margin-bottom: 4px; }
+  .card-class { color: var(--muted); margin-bottom: 3px; }
+  .card-score { font-family: var(--font-mono); }
+  .card-score.high   { color: var(--crack); }
+  .card-score.medium { color: var(--warning); }
+  .card-score.low    { color: var(--accent2); }
+
+  /* ── Resurrection Wall ────────────────────────────────────── */
+  #resurrection-wall {
+    position: fixed;
+    inset: 0;
+    background: #020305;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    cursor: pointer;
+  }
+
+  #resurrection-wall.visible { display: flex; }
+
+  .wall-title {
+    font-size: 11px;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 40px;
+  }
+
+  .wall-inscriptions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+    max-width: 800px;
+    width: 100%;
+  }
+
+  .wall-item {
+    text-align: center;
+    opacity: 0;
+    animation: wallReveal 1s forwards;
+  }
+
+  .wall-geez {
+    font-size: 36px;
+    color: var(--accent);
+    font-family: 'Noto Serif Ethiopic', serif;
+    letter-spacing: 4px;
+    text-shadow: 0 0 30px rgba(200,150,62,0.4);
+  }
+
+  .wall-translation {
+    font-size: 12px;
+    color: var(--muted);
+    font-style: italic;
+    margin-top: 4px;
+  }
+
+  .wall-site {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #3a3f4a;
+    margin-top: 2px;
+  }
+
+  .wall-close-hint {
+    position: absolute;
+    bottom: 24px;
+    font-size: 10px;
+    color: #2a2f3a;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* ── Animations ───────────────────────────────────────────── */
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-10px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  @keyframes wallReveal {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Bottom panels layout ─────────────────────────────────── */
+  #bottom-left  { display: grid; grid-template-rows: 1fr 1fr; gap: 1px; background: var(--border); }
+  #bottom-right { display: grid; grid-template-rows: 1fr 1fr; gap: 1px; background: var(--border); }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Header ─────────────────────────────────────────────── -->
+  <header id="header">
+    <div class="logo">AXUM <span>Rover</span></div>
+
+    <div class="header-stats">
+      <div class="stat">
+        <div class="stat-value" id="stat-processed">0</div>
+        <div class="stat-label">Processed</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="stat-discoveries">0</div>
+        <div class="stat-label">Discoveries</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="stat-critical">0</div>
+        <div class="stat-label">Critical</div>
+      </div>
+    </div>
+
+    <a href="/catalogue" target="_blank"
+       style="font-size:10px;color:var(--accent);letter-spacing:1px;text-decoration:none;
+              text-transform:uppercase;margin-right:12px;">Catalogue 3D</a>
+    <div id="status-badge">IDLE</div>
+  </header>
+
+  <!-- ── Main Area ───────────────────────────────────────────── -->
+  <div id="main">
+
+    <!-- Camera Feed -->
+    <div class="panel" id="camera-panel">
+      <div class="panel-header">
+        <span class="panel-title">Live Camera Feed</span>
+        <span id="cam-status" style="font-size:9px;color:var(--muted)">NO SIGNAL</span>
+      </div>
+      <div class="panel-body" style="background:#050608;">
+        <img id="camera-img" style="display:none;width:100%;height:100%;object-fit:contain;">
+        <div id="camera-placeholder">
+          <div class="cam-icon">◉</div>
+          <span style="font-size:10px;letter-spacing:2px;text-transform:uppercase;">Awaiting signal</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sensing Outputs -->
+    <div class="panel" id="sensing-panel">
+      <div class="panel-header">
+        <span class="panel-title">Sensing Analysis</span>
+        <span id="artefact-id-display" style="font-size:9px;color:var(--accent)">—</span>
+      </div>
+      <div class="panel-body">
+        <div class="sensing-grid">
+
+          <!-- Crack -->
+          <div class="sense-cell" id="cell-crack">
+            <span class="sense-label">Crack Severity</span>
+            <span class="sense-value" id="val-crack">—</span>
+            <div class="sense-bar"><div class="sense-bar-fill" id="bar-crack" style="width:0%;background:var(--crack)"></div></div>
+          </div>
+
+          <!-- Stress -->
+          <div class="sense-cell" id="cell-stress">
+            <span class="sense-label">Surface Stress</span>
+            <span class="sense-value" id="val-stress">—</span>
+            <div class="sense-bar"><div class="sense-bar-fill" id="bar-stress" style="width:0%;background:var(--stress)"></div></div>
+          </div>
+
+          <!-- Salt -->
+          <div class="sense-cell" id="cell-salt">
+            <span class="sense-label">Salt Risk</span>
+            <span class="sense-value" id="val-salt">—</span>
+            <div class="sense-bar"><div class="sense-bar-fill" id="bar-salt" style="width:0%;background:var(--salt)"></div></div>
+          </div>
+
+          <!-- Triage Score -->
+          <div class="sense-cell" id="cell-triage">
+            <span class="sense-label">Triage Score</span>
+            <div id="triage-score">—</div>
+            <span id="triage-label" style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;">awaiting scan</span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end #main -->
+
+  <!-- ── Bottom Area ─────────────────────────────────────────── -->
+  <div id="bottom">
+
+    <!-- Bottom Left: Inscription + Fragility -->
+    <div id="bottom-left">
+
+      <!-- Inscription -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Inscription</span>
+          <span id="inscription-conf" style="font-size:9px;color:var(--muted)"></span>
+        </div>
+        <div class="panel-body" id="inscription-panel">
+          <div class="inscription-text" id="inscription-text">—</div>
+          <div class="inscription-translation" id="inscription-translation">awaiting recognition</div>
+          <div class="inscription-meta" id="inscription-meta"></div>
+        </div>
+      </div>
+
+      <!-- Treatment Protocol -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Treatment Protocol</span>
+          <span id="fragility-years" style="font-size:14px;font-family:var(--font-mono);color:var(--accent2)">— yr</span>
+        </div>
+        <div class="panel-body" id="treatment-panel">
+          <div id="treatment-empty">Awaiting scan analysis</div>
+          <div id="treatment-content" style="display:none">
+            <div class="treatment-header">
+              <div class="treatment-substrate">
+                <div><strong id="treatment-substrate">—</strong></div>
+                <div id="treatment-decay" style="margin-top:2px">—</div>
+              </div>
+              <div id="treatment-urgency">—</div>
+            </div>
+            <div class="treatment-section-title safe">Safe to apply</div>
+            <div id="treatment-safe-list"></div>
+            <div class="treatment-section-title unsafe">Do not apply</div>
+            <div id="treatment-unsafe-list"></div>
+            <div class="risk-factors" id="risk-factors"></div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- end bottom-left -->
+
+    <!-- Bottom Right: Log + Catalogue -->
+    <div id="bottom-right">
+
+      <!-- Mission Log -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Mission Log</span>
+          <span id="log-count" style="font-size:9px;color:var(--muted)">0 entries</span>
+        </div>
+        <div class="panel-body" id="log-panel"></div>
+      </div>
+
+      <!-- Catalogue Strip -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Catalogue</span>
+        </div>
+        <div class="panel-body" style="overflow:hidden;">
+          <div id="catalogue-strip">
+            <span style="color:var(--muted);font-size:10px;margin:auto;">No artefacts processed yet</span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- end bottom-right -->
+
+  </div><!-- end #bottom -->
+
+</div><!-- end #app -->
+
+<!-- Resurrection Wall overlay -->
+<div id="resurrection-wall" onclick="closeResurrectionWall()">
+  <div class="wall-title">Voices Across Centuries</div>
+  <div class="wall-inscriptions" id="wall-inscriptions"></div>
+  <div class="wall-close-hint">Click anywhere to return</div>
+</div>
+
+<script>
+// ── WebSocket connection ───────────────────────────────────────
+const socket = io();
+let logCount = 0;
+let discoveryCount = 0;
+let criticalCount = 0;
+
+socket.on('connect', () => {
+  updateStatus('CONNECTED', 'scanning');
+});
+
+socket.on('disconnect', () => {
+  updateStatus('OFFLINE', '');
+});
+
+// ── Event handlers ─────────────────────────────────────────────
+
+socket.on('mission_started', (d) => {
+  updateStatus('SCANNING', 'scanning');
+  document.getElementById('stat-processed').textContent = '0';
+});
+
+socket.on('artefact_picked', (d) => {
+  document.getElementById('artefact-id-display').textContent = d.artefact_id;
+  resetSensingCells();
+});
+
+socket.on('camera_frame', (d) => {
+  if (!d.image_b64) return;
+  const img = document.getElementById('camera-img');
+  const ph  = document.getElementById('camera-placeholder');
+  img.src = 'data:image/jpeg;base64,' + d.image_b64;
+  img.style.display = 'block';
+  ph.style.display  = 'none';
+  document.getElementById('cam-status').textContent = 'LIVE';
+  document.getElementById('cam-status').style.color = '#4caf7d';
+});
+
+socket.on('crack_detected', (d) => {
+  const pct = Math.round(d.severity * 100);
+  const cls = d.severity > 0.7 ? 'high' : d.severity > 0.4 ? 'medium' : 'low';
+  setCell('crack', pct + '%', pct, cls);
+  updateTriageScore();
+});
+
+socket.on('stress_detected', (d) => {
+  const pct = Math.round(d.overall_stress * 100);
+  const cls = pct > 60 ? 'high' : pct > 30 ? 'medium' : 'low';
+  setCell('stress', pct + '%', pct, cls);
+  updateTriageScore();
+});
+
+socket.on('salt_detected', (d) => {
+  const pct = Math.round(d.overall_risk * 100);
+  const cls = d.critical ? 'high' : pct > 25 ? 'medium' : 'low';
+  setCell('salt', pct + '%', pct, cls);
+  if (d.critical) criticalCount++;
+  document.getElementById('stat-critical').textContent = criticalCount;
+  updateTriageScore();
+});
+
+socket.on('inscription_recognized', (d) => {
+  document.getElementById('inscription-text').textContent        = d.text || '—';
+  document.getElementById('inscription-translation').textContent = d.translation || '';
+  document.getElementById('inscription-conf').textContent        = d.confidence ? Math.round(d.confidence * 100) + '% conf' : '';
+
+  const meta = document.getElementById('inscription-meta');
+  meta.innerHTML = '';
+
+  if (d.is_new_discovery) {
+    discoveryCount++;
+    document.getElementById('stat-discoveries').textContent = discoveryCount;
+    meta.innerHTML += '<span class="badge discovery">⚡ New Discovery</span>';
+  } else if (d.site) {
+    meta.innerHTML += `<span class="badge known">✓ ${d.site}</span>`;
+  }
+
+  meta.innerHTML += `<span class="badge conf">${Math.round((d.confidence||0)*100)}% confidence</span>`;
+});
+
+socket.on('fragility_clock', (d) => {
+  const el = document.getElementById('fragility-years');
+  el.textContent = d.years_remaining + ' yr';
+  el.className   = d.is_critical ? 'critical' : '';
+
+  const rf = document.getElementById('risk-factors');
+  if (rf && !rf.dataset.protocolActive) {
+    rf.innerHTML = (d.risk_factors || []).slice(0, 3)
+      .map(f => `<div class="risk-factor">▸ ${f}</div>`).join('');
+  }
+});
+
+socket.on('treatment_protocol', (d) => {
+  document.getElementById('treatment-empty').style.display = 'none';
+  const content = document.getElementById('treatment-content');
+  content.style.display = 'block';
+
+  document.getElementById('treatment-substrate').textContent = d.substrate_name || '—';
+  document.getElementById('treatment-decay').textContent =
+    (d.decay_names || []).join(' + ') || '—';
+
+  const urg = document.getElementById('treatment-urgency');
+  urg.textContent = d.urgency || '—';
+  urg.style.color = d.urgency_color || 'var(--muted)';
+  urg.style.borderColor = d.urgency_color || 'var(--border)';
+  urg.style.background = (d.urgency_color || '#333') + '22';
+
+  const safeList = document.getElementById('treatment-safe-list');
+  safeList.innerHTML = (d.safe_treatments || []).slice(0, 4).map((t, i) => `
+    <div class="treatment-item safe">
+      <div class="treatment-name">${i+1}. ${t.name}</div>
+      <div class="treatment-detail">${(t.application || '').slice(0, 120)}</div>
+    </div>
+  `).join('') || '<div class="treatment-detail">No safe treatments matched</div>';
+
+  const unsafeList = document.getElementById('treatment-unsafe-list');
+  unsafeList.innerHTML = (d.unsafe_treatments || []).slice(0, 4).map((t, i) => `
+    <div class="treatment-item unsafe">
+      <div class="treatment-name">${i+1}. ${t.name} <span class="treatment-risk">[${t.risk}]</span></div>
+      <div class="treatment-detail">${(t.mechanism || '').slice(0, 120)}</div>
+    </div>
+  `).join('') || '<div class="treatment-detail">No contraindications flagged</div>';
+
+  const rf = document.getElementById('risk-factors');
+  rf.dataset.protocolActive = '1';
+  const notes = (d.confidence_notes || []).slice(0, 2)
+    .map(n => `<div class="risk-factor">▸ ${n}</div>`).join('');
+  rf.innerHTML = notes;
+});
+
+socket.on('catalogue_updated', (d) => {
+  const e    = d.entry;
+  const strip = document.getElementById('catalogue-strip');
+
+  // Remove placeholder
+  const ph = strip.querySelector('span');
+  if (ph) ph.remove();
+
+  const score = e.damage_score || 0;
+  const cls   = score > 0.7 ? 'high' : score > 0.4 ? 'medium' : 'low';
+
+  const card = document.createElement('div');
+  card.className = 'catalogue-card';
+  card.innerHTML = `
+    <div class="card-id">${e.id}</div>
+    <div class="card-class">${(e.classification||'unknown').replace('_',' ')}</div>
+    <div class="card-score ${cls}">${Math.round(score*100)}% damage</div>
+    ${e.inscription_text ? `<div style="color:var(--accent);font-size:10px;margin-top:3px">${e.inscription_text.slice(0,8)}…</div>` : ''}
+  `;
+  strip.appendChild(card);
+  strip.scrollLeft = strip.scrollWidth;
+
+  document.getElementById('stat-processed').textContent = d.total_complete;
+});
+
+socket.on('mission_complete', (d) => {
+  updateStatus('COMPLETE', 'complete');
+});
+
+socket.on('resurrection_wall', (d) => {
+  showResurrectionWall(d.inscriptions);
+});
+
+socket.on('log_message', (d) => {
+  addLog(d.message, d.level, d.timestamp);
+});
+
+socket.on('state_sync', (state) => {
+  // Restore state on reconnect
+  (state.log || []).slice(-20).forEach(e => addLog(e.message, e.level, e.timestamp));
+  (state.catalogue || []).forEach(e => {
+    // Re-emit catalogue entries
+    socket.emit('catalogue_updated', { entry: e, total_complete: state.artefacts_done });
+  });
+});
+
+// ── Helper functions ───────────────────────────────────────────
+
+function updateStatus(text, cls) {
+  const el = document.getElementById('status-badge');
+  el.textContent  = text;
+  el.className    = cls;
+}
+
+function setCell(id, label, pct, cls) {
+  document.getElementById('val-' + id).textContent = label;
+  document.getElementById('val-' + id).className   = 'sense-value ' + cls;
+  document.getElementById('bar-' + id).style.width = Math.min(pct, 100) + '%';
+  document.getElementById('cell-' + id).classList.add('active');
+}
+
+function resetSensingCells() {
+  ['crack','stress','salt'].forEach(id => {
+    document.getElementById('val-' + id).textContent = '—';
+    document.getElementById('val-' + id).className   = 'sense-value';
+    document.getElementById('bar-' + id).style.width = '0%';
+    document.getElementById('cell-' + id).classList.remove('active');
+  });
+  document.getElementById('triage-score').textContent = '—';
+  document.getElementById('triage-label').textContent = 'awaiting scan';
+  document.getElementById('treatment-empty').style.display = 'block';
+  document.getElementById('treatment-content').style.display = 'none';
+  document.getElementById('fragility-years').textContent = '— yr';
+  const rf = document.getElementById('risk-factors');
+  if (rf) { rf.innerHTML = ''; delete rf.dataset.protocolActive; }
+}
+
+function updateTriageScore() {
+  const crack  = parseFloat(document.getElementById('bar-crack').style.width)  || 0;
+  const stress = parseFloat(document.getElementById('bar-stress').style.width) || 0;
+  const salt   = parseFloat(document.getElementById('bar-salt').style.width)   || 0;
+  const score  = Math.round((crack * 0.5 + stress * 0.3 + salt * 0.2));
+
+  const el = document.getElementById('triage-score');
+  el.textContent = score;
+  el.style.color = score > 70 ? 'var(--crack)' : score > 40 ? 'var(--warning)' : 'var(--accent2)';
+
+  const labels = ['STABLE','MONITOR','PRIORITY','CRITICAL'];
+  const idx    = score > 70 ? 3 : score > 50 ? 2 : score > 25 ? 1 : 0;
+  document.getElementById('triage-label').textContent = labels[idx];
+}
+
+function addLog(message, level, timestamp) {
+  const panel = document.getElementById('log-panel');
+  const entry = document.createElement('div');
+  entry.className = 'log-entry ' + (level || 'info');
+  entry.innerHTML = `<span class="log-time">${timestamp||''}</span><span class="log-msg">${message}</span>`;
+  panel.appendChild(entry);
+  panel.scrollTop = panel.scrollHeight;
+  logCount++;
+  document.getElementById('log-count').textContent = logCount + ' entries';
+  // Keep max 80 entries
+  while (panel.children.length > 80) panel.removeChild(panel.firstChild);
+}
+
+function showResurrectionWall(inscriptions) {
+  const wall = document.getElementById('resurrection-wall');
+  const list = document.getElementById('wall-inscriptions');
+  list.innerHTML = '';
+
+  (inscriptions || []).forEach((item, i) => {
+    const div = document.createElement('div');
+    div.className = 'wall-item';
+    div.style.animationDelay = (i * 0.6) + 's';
+    div.innerHTML = `
+      <div class="wall-geez">${item.inscription_text || ''}</div>
+      <div class="wall-translation">${item.translation || ''}</div>
+      ${item.site ? `<div class="wall-site">${item.site}</div>` : ''}
+    `;
+    list.appendChild(div);
+  });
+
+  wall.classList.add('visible');
+}
+
+function closeResurrectionWall() {
+  document.getElementById('resurrection-wall').classList.remove('visible');
+}
+
+// Keyboard shortcut: press R to trigger Resurrection Wall manually
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'r' || e.key === 'R') {
+    socket.emit('trigger_resurrection_wall');
+  }
+  if (e.key === 'Escape') closeResurrectionWall();
+});
+</script>
+</body>
+</html>
