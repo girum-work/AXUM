@@ -9,7 +9,7 @@ Two-stage pipeline:
     detect_and_classify_tray()   — Stage 1 + Stage 2: full pipeline
 
 Train classifier: python scripts/train_classifier.py
-Train YOLO:       python scripts/train_yolov8.py
+Train YOLO:       python scripts/train_yolo11.py
 Coins:            src/object_detection/coin_inspection.py (second stage)
 """
 

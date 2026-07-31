@@ -26,6 +26,13 @@ FRAGMENT_GROUPS_JSON = DATA_DIR / "databases" / "fragment_groups.json"
 
 # ─── Camera ───────────────────────────────────────────────────
 ESP32_CAM_URL   = "http://192.168.1.105:81/stream"   # update after first boot
+# Pi 4 IR-CUT camera server (see services/pi/pi_camera_server.py). Not wired
+# as CameraInterface's default yet -- whether the Pi camera is meant to
+# fully replace ESP32_CAM_URL as primary, or run alongside it, is still an
+# open integration question (see integration report). Update the IP after
+# first boot, same as ESP32_CAM_URL above.
+PI_CAM_URL      = "http://<pi-ip>:5001/stream"
+PI_CAM_CAPTURE  = "http://<pi-ip>:5001/capture"
 CAMERA_WIDTH    = 640
 CAMERA_HEIGHT   = 480
 CAMERA_FPS      = 10
@@ -47,12 +54,8 @@ WALL_WIDTH_CM   = 80.0
 ROVER_SPEED_CMS = 10.0
 
 # ─── OCR ──────────────────────────────────────────────────────
-# NOTE: OCR_IMG_SIZE and NUM_GEEZ_CLASSES appear twice below — the SECOND
-# assignment wins in Python. The (32, 128) and 300 values are the active ones.
 OCR_MODEL_PATH      = MODELS_DIR / "geez_ocr.pth"
 OCR_CONFIDENCE_MIN  = 0.50    # below this = flag for expert review
-OCR_IMG_SIZE        = 64      # DEPRECATED — overridden by (32, 128) on next line
-NUM_GEEZ_CLASSES    = 231     # DEPRECATED — overridden by 300 below
 OCR_IMG_SIZE      = (32, 128)   # height, width in pixels — active OCR input shape
 NUM_GEEZ_CLASSES  = 300         # active charset size after build_geez_charset()
 OCR_BEAM_WIDTH    = 5           # CTC beam search width at inference
@@ -62,9 +65,7 @@ OCR_USE_STONE_AUGMENT = True    # albumentations stone-inscription train augment
 OCR_USE_ADAPTIVE_BINARIZE = True  # CLAHE + adaptive threshold in preprocess_for_ocr
 
 # ── Models ─────────────────────────────────────────────────────
-OCR_MODEL_PATH  = MODELS_DIR / "geez_ocr.pth"
-OBJ_MODEL_PATH  = MODELS_DIR / "artefact_classifier.pth"
-YOLO_MODEL_PATH = MODELS_DIR / "yolov8_artefacts.pt"
+YOLO_MODEL_PATH = MODELS_DIR / "yolo11_artefacts.pt"
                  # Set to None to use COCO fallback before fine-tuning
 
 # ─── Object Detection ─────────────────────────────────────────
@@ -108,8 +109,8 @@ BM_REQUEST_TIMEOUT = 12
 # AXUM covers all Ethiopian numismatic history — not Aksum-only.
 COIN_SUBTYPES_DIR = DATA_DIR / "coin_subtypes"
 YOLO_COIN_DATASET_DIR = DATA_DIR / "yolo_coin_dataset"
-YOLO_COIN_MODEL_PATH = MODELS_DIR / "yolov8_coins.pt"
-# YOLO class names for era + denomination (train_yolov8_coins.py)
+YOLO_COIN_MODEL_PATH = MODELS_DIR / "yolo11_coins.pt"
+# YOLO class names for era + denomination (train_yolo11_coins.py)
 YOLO_COIN_CLASSES = [
     "coin_aksumite",
     "coin_menelik",
@@ -193,6 +194,32 @@ ARTEFACT_SUBSTRATE_MAP = {
 TREATMENT_URGENCY_CRITICAL_YEARS = 5    # fragility clock below → emergency
 TREATMENT_URGENCY_PRIORITY_YEARS  = 20   # fragility clock below → priority
 
+# ─── Fragility Clock ──────────────────────────────────────────
+# Weights sum to 1.0 -- relative importance of each damage dimension in the
+# composite score. Crack + salt dominate (structural + chemical decay are
+# the two fastest failure modes); stress/moisture/bio contribute but don't
+# dominate on their own. Reasoned starting point, not fitted to field data
+# -- see fragility_clock.calibrate_baseline() for recalibrating against
+# real cases once available.
+FRAGILITY_WEIGHT_CRACK    = 0.35
+FRAGILITY_WEIGHT_SALT     = 0.30
+FRAGILITY_WEIGHT_STRESS   = 0.15
+FRAGILITY_WEIGHT_MOISTURE = 0.10
+FRAGILITY_WEIGHT_BIO      = 0.10
+
+# Substrate baseline years (time-to-loss at zero measured damage).
+# Literature-motivated relative ordering (stone > metal > porous stone >
+# ceramic under equal damage), not measured against real AXUM finds.
+# Keys must match ARTEFACT_SUBSTRATE_MAP's values above, plus 'default'
+# for resolve_substrate()'s fallback.
+FRAGILITY_BASELINE_YEARS = {
+    "basalt":              300,   # dense igneous stone -- most durable
+    "metal_bronze":        200,   # corrodes slowly if not actively wet
+    "limestone_porous":    100,   # porous -- vulnerable to salt/moisture cycling
+    "terracotta_ceramic":   80,   # fired clay -- fastest degrading of the four
+    "default":             100,
+}
+
 # ─── Fragment Grouping ────────────────────────────────────────
 FRAGMENT_MATCH_POSSIBLE_MIN  = 0.65   # possible same-vessel match
 FRAGMENT_MATCH_CONFIRMED_MIN = 0.85   # confirmed fragment pair
@@ -200,9 +227,12 @@ FRAGMENT_ICP_MAX_DISTANCE_M  = 0.005  # 5 mm ICP correspondence threshold
 FRAGMENT_DENSITY_TOLERANCE   = 0.5    # g/cm³ — beyond this, reject match
 
 # ── LED ────────────────────────────────────────────────────────
-LED_PIN       = 11
-LED_COUNT     = 12           # number of NeoPixels in your ring
-LED_BRIGHTNESS= 0.6          # 0.0 to 1.0
+# NeoPixel ring was dropped from the build. Real hardware as of this
+# integration pass: 4x quadrant LEDs (photometric stereo, N/E/S/W) + 1x UV
+# LED, driven via PCA9685 + MOSFETs on the Arduino side (see
+# arduino/axum_rover/axum_rover.ino, LED:QUAD:*/LED:UV:* commands, and
+# src/arm/controller.py's LightingController). No Python-side pin/count
+# constants needed -- that's firmware-side now via I2C channel numbers.
 
 # ─── Dashboard ────────────────────────────────────────────────
 DASHBOARD_HOST  = "0.0.0.0"
@@ -215,3 +245,44 @@ LOG_LEVEL  = "INFO"          # DEBUG, INFO, WARNING, ERROR
 LOGS_DIR = ROOT_DIR / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOGS_DIR / "axum_rover.log"
+
+# ── Multispectral (NDCI stress mapping) ──────────────────────────
+# Added in this integration pass — multispectral.py imports these but they
+# didn't exist anywhere in config.py, so the module could not be imported
+# at all until now. Values below are reasoned starting points (not
+# measured against real visible/IR captures) -- needs a calibration pass
+# once real quadrant-LED + IR frame pairs exist (see
+# calibrate_ndci_baseline() in multispectral.py, built for exactly this).
+MULTISPECTRAL_EPSILON                 = 1e-6   # avoid div-by-zero in NDCI ratio
+MULTISPECTRAL_MIN_REGION_AREA_PX      = 30     # matches MIN_CRACK_AREA -- same
+                                                 # contours, just re-scored
+MULTISPECTRAL_HAZARD_SCORE_MIN        = 0.40   # >= this -> "hazard"
+MULTISPECTRAL_SURFACE_ONLY_SCORE_MAX  = 0.15   # <= this -> "surface-only"
+                                                 # (between the two = "monitor")
+
+# ── Photometric stereo (relief mapping) ──────────────────────────
+# Same situation as above -- photometric_stereo.py imports these, none
+# existed. Values are reasoned defaults, not measured.
+PHOTOMETRIC_ALBEDO_EPSILON            = 1e-6   # avoid div-by-zero normalizing normals
+PHOTOMETRIC_DEPTH_GRADIENT_SCALE      = 1.0    # neutral scale on p/q gradients
+PHOTOMETRIC_DEPTH_SMOOTH_ITERATIONS   = 30     # relief integration smoothing passes
+
+# ── Compute tier (CPU/GPU) ────────────────────────────────────────
+# Added this pass -- despite being referenced as "already defined
+# elsewhere" by two separate handoffs (Robotics Software Engineer's
+# earlier work, AI & Computer Vision Engineer's GPU-tier handoff), it did
+# not actually exist anywhere in this file. Confirmed by direct search
+# before adding, not assumed. "cpu" is the safe default -- GPU-tier code
+# paths (src/object_detection/device_utils.py) fall back to CPU weights
+# with a loud warning if "gpu" is requested but no CUDA device is
+# actually present, so this is safe to leave as "cpu" on any machine.
+COMPUTE_TIER = "cpu"   # "cpu" or "gpu" -- set to "gpu" on the GPU-tier test machine
+
+# GPU-tier restoration model name. None until ML Research Engineer's
+# ablation (which model size actually wins for restoration) names a
+# specific larger variant -- until then, GPU tier requests the SAME
+# model as CPU tier, just asking for GPU acceleration. Actual GPU
+# offload is a manual LM Studio server-side setting, NOT controlled by
+# this value or any Python code -- see src/ocr/llm_restoration.py's
+# _resolve_restoration_model_name() for the full explanation.
+RESTORATION_MODEL_GPU = None   # e.g. "qwen2.5-7b-instruct" once ablation confirms

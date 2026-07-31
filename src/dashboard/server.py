@@ -184,11 +184,13 @@ def emit_fragility_clock(artefact_id: str, years_remaining: float,
         years_remaining: Estimated years before irreversible damage
         risk_factors:   List of strings describing risk factors
     """
+    from config import TREATMENT_URGENCY_CRITICAL_YEARS
+
     emit_event("fragility_clock", {
         "artefact_id":    artefact_id,
         "years_remaining": round(years_remaining, 1),
         "risk_factors":   risk_factors or [],
-        "is_critical":    years_remaining < 20
+        "is_critical":    years_remaining < TREATMENT_URGENCY_CRITICAL_YEARS,
     })
 
 
@@ -448,6 +450,62 @@ def start_server(host: str = "0.0.0.0", port: int = 5000,
 # Runs without hardware to test the dashboard UI
 # ═══════════════════════════════════════════════════════════════
 
+def run_mission_in_background(
+    artefact_count: int = 1,
+    *,
+    hardware: bool = False,
+    generate_mesh: bool = True,
+) -> threading.Thread:
+    """
+    Run MissionPipeline in a daemon thread inside this dashboard process.
+
+    WHAT: Starts the real mission loop after the SocketIO server is live so
+    ``emit_event()`` calls hit the same ``socketio`` instance browsers use.
+    WHY: Importing dashboard emitters from a separate pipeline process creates
+    a second SocketIO with no subscribers — the root cause of silent live
+    dashboard failures.
+
+    Args:
+        artefact_count: Number of artefacts to process.
+        hardware:       When True, open serial/camera hardware (not dry-run).
+        generate_mesh:  When False, skip mesh stage.
+
+    Returns:
+        The started daemon thread (already running).
+    """
+    def _runner() -> None:
+        from src.pipeline.main_pipeline import MissionPipeline
+
+        mission_state["status"] = "SCANNING"
+        mission_state["artefacts_total"] = artefact_count
+        mission_state["artefacts_done"] = 0
+        log_message(
+            f"Mission started ({'hardware' if hardware else 'dry-run'})",
+            "info",
+        )
+        try:
+            pipeline = MissionPipeline(
+                artefact_count=artefact_count,
+                dry_run=not hardware,
+                generate_mesh=generate_mesh,
+                emit_dashboard=True,
+            )
+            records = pipeline.run()
+            mission_state["status"] = "COMPLETE"
+            log_message(
+                f"Mission complete — {len(records)} artefact(s) processed",
+                "success",
+            )
+        except Exception as exc:
+            mission_state["status"] = "ERROR"
+            log_message(f"Mission failed: {exc}", "error")
+            logger.exception("Mission thread failed")
+
+    thread = threading.Thread(target=_runner, daemon=True, name="axum-mission")
+    thread.start()
+    return thread
+
+
 def run_demo_sequence():
     """
     Simulate a complete mission for UI testing.
@@ -596,18 +654,45 @@ def run_demo_sequence():
 if __name__ == "__main__":
     import sys
 
-    demo_mode = "--demo" in sys.argv
+    from config import DASHBOARD_HOST, DASHBOARD_PORT
 
-    # Create template and static dirs if they don't exist
-    Path("src/dashboard/templates").mkdir(parents=True, exist_ok=True)
-    Path("src/dashboard/static").mkdir(parents=True, exist_ok=True)
+    demo_mode = "--demo" in sys.argv
+    mission_mode = "--mission" in sys.argv
+    hardware_mode = "--hardware" in sys.argv
+    count = 1
+    for i, arg in enumerate(sys.argv):
+        if arg == "--count" and i + 1 < len(sys.argv):
+            try:
+                count = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
+    if demo_mode and mission_mode:
+        print("Use either --demo or --mission, not both.")
+        raise SystemExit(2)
 
     if demo_mode:
         print("Starting AXUM Dashboard in DEMO mode...")
-        print("Open http://localhost:5000 in your browser")
-        threading.Thread(
-            target=run_demo_sequence, daemon=True
-        ).start()
+        threading.Thread(target=run_demo_sequence, daemon=True).start()
+    elif mission_mode:
+        print(
+            f"Starting AXUM Dashboard + mission "
+            f"({'hardware' if hardware_mode else 'dry-run'}, count={count})..."
+        )
 
-    socketio.run(app, host="0.0.0.0", port=5000,
-                 debug=False, use_reloader=False)
+        def _delayed_mission() -> None:
+            time.sleep(2)
+            run_mission_in_background(
+                count, hardware=hardware_mode, generate_mesh=True
+            )
+
+        threading.Thread(target=_delayed_mission, daemon=True).start()
+
+    print(f"Open http://localhost:{DASHBOARD_PORT} in your browser")
+    socketio.run(
+        app,
+        host=DASHBOARD_HOST,
+        port=DASHBOARD_PORT,
+        debug=False,
+        use_reloader=False,
+    )

@@ -60,9 +60,9 @@ def check_classifier_model() -> tuple[bool, str]:
 
 
 def check_yolo_model() -> tuple[bool, str]:
-    """Check whether the fine-tuned YOLOv8 artefact model exists."""
-    path = Path("models/yolov8_artefacts.pt")
-    return path.exists(), "Found" if path.exists() else "MISSING - run train_yolov8.py"
+    """Check whether the fine-tuned YOLO11 artefact model exists."""
+    path = Path("models/yolo11_artefacts.pt")
+    return path.exists(), "Found" if path.exists() else "MISSING - run train_yolo11.py"
 
 
 def check_geez_data() -> tuple[bool, str]:
@@ -131,7 +131,7 @@ def main() -> int:
     print("\n[2/5] Models...")
     check("Ge'ez OCR model", check_ocr_model)
     check("Artefact classifier", check_classifier_model)
-    check("YOLOv8 model", check_yolo_model)
+    check("YOLO11 model", check_yolo_model)
 
     print("\n[3/5] Datasets...")
     check("Ge'ez character data", check_geez_data)

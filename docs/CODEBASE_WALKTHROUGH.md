@@ -114,7 +114,7 @@ OCR_USE_ADAPTIVE_BINARIZE = True  # inference: CLAHE + adaptive threshold
 ```python
 OCR_MODEL_PATH = MODELS_DIR / "geez_ocr.pth"
 OBJ_MODEL_PATH = MODELS_DIR / "artefact_classifier.pth"
-YOLO_MODEL_PATH = MODELS_DIR / "yolov8_artefacts.pt"
+YOLO_MODEL_PATH = MODELS_DIR / "yolo11_artefacts.pt"
 ```
 
 ### Lines 56–91 — Object detection + artefact dataset
@@ -431,8 +431,8 @@ Must implement mission loop described in `TECHNICAL_HANDOFF.md` §5.
 |--------|-----------|--------|---------|
 | `train_ocr.py` | OCR data ready | `models/geez_ocr.pth` | Hours (CPU) |
 | `train_classifier.py` | 500+ artefact imgs | `models/artefact_classifier.pth` | 1–3 h |
-| `train_yolov8.py` | Detection labels ready | `models/yolov8_artefacts.pt` | 1–2 h |
-| `train_yolov8_coins.py` | Coin images ready | `models/yolov8_coins.pt` | 1–2 h |
+| `train_yolo11.py` | Detection labels ready | `models/yolo11_artefacts.pt` | 1–2 h |
+| `train_yolo11_coins.py` | Coin images ready | `models/yolo11_coins.pt` | 1–2 h |
 
 ### LLM / restoration data
 

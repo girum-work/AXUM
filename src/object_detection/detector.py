@@ -7,13 +7,13 @@ Two-stage pipeline for artefacts sitting in the storage tray:
       Output: bounding boxes + center coordinates.
       Fast (~1ms), runs every frame.
 
-  Stage 2 — TYPE IDENTIFICATION (YOLOv8 nano)
+  Stage 2 — TYPE IDENTIFICATION (YOLO11 nano)
       Identifies WHAT each object is from its cropped region.
       Output: class name + confidence score.
       Slower (~50ms per crop), runs once per object.
 
 Why two stages instead of one?
-    YOLOv8 alone could do both — but on a plain tray background
+    YOLO11 alone could do both — but on a plain tray background
     with well-separated objects, contour detection gives more
     precise pixel coordinates for arm navigation than YOLO's
     bounding boxes (which have a few pixels of slack). The arm
@@ -21,6 +21,8 @@ Why two stages instead of one?
     two jobs.
 
 Author: Axum Rover Team'''
+
+from __future__ import annotations
 
 import cv2
 import numpy as np
@@ -90,8 +92,8 @@ def preprocess_for_inference(image: np.ndarray) -> torch.Tensor:
 class ArtefactClassifier(nn.Module):
     """
     MobileNetV2-based artefact classifier.
-    Used as fallback when YOLOv8 confidence is below threshold,
-    or when the YOLOv8 model has not been fine-tuned yet.
+    Used as fallback when YOLO11 confidence is below threshold,
+    or when the YOLO11 model has not been fine-tuned yet.
 
     Transfer learning:
         - Lower MobileNetV2 layers: frozen (keep ImageNet weights)
@@ -181,6 +183,111 @@ class ArtefactClassifier(nn.Module):
         }
 
 
+class EfficientNetB3Classifier(nn.Module):
+    """
+    GPU-tier artefact classifier (EfficientNet-B3), added this pass.
+
+    CPU tier (ArtefactClassifier, above, MobileNetV2) is UNCHANGED by
+    this addition -- this is a new, additive option, not a replacement.
+
+    WHY EfficientNet-B3 over an unrelated architecture like ResNet50:
+    staying within a size-progression mindset (MobileNetV2 on CPU,
+    EfficientNet-B3 on GPU) keeps the two tiers comparable in spirit even
+    though they're not literally the same architecture family --
+    MobileNetV2 doesn't have a natural "bigger" variant that's worth the
+    GPU headroom, so this is the closest practical equivalent, not a
+    strict lineage match.
+
+    IMPORTANT: input resolution differs from the CPU-tier model.
+    EfficientNet-B3 expects 300x300, not MobileNetV2's 224x224
+    (see preprocess_for_inference, which is 224x224-only right now).
+    Callers MUST use a tier-aware preprocessing step for GPU-tier
+    inference or images will silently run at the wrong resolution --
+    this is the most likely silent-bug point in this addition, flagging
+    it here rather than letting it be discovered the hard way.
+    """
+
+    def __init__(self, num_classes: int = 5, pretrained: bool = True):
+        super().__init__()
+        if pretrained:
+            self.backbone = models.efficientnet_b3(weights=models.EfficientNet_B3_Weights.DEFAULT)
+        else:
+            self.backbone = models.efficientnet_b3(weights=None)
+        in_features = self.backbone.classifier[1].in_features
+        self.backbone.classifier[1] = nn.Linear(in_features, num_classes)
+        self.num_classes = num_classes
+        self.input_size = 300  # NOT 224 -- see class docstring
+        logger.info(f"EfficientNet-B3 classifier ready: {num_classes} classes")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
+
+    def predict(self, image: np.ndarray, device: torch.device = None) -> dict:
+        """
+        Classify a single image. Same return shape as
+        ArtefactClassifier.predict() for drop-in compatibility, EXCEPT
+        this does NOT use preprocess_for_inference() (224x224) -- it
+        resizes to 300x300 directly here, since the shared preprocessing
+        helper is CPU-tier-sized only.
+        """
+        import cv2
+
+        self.eval()
+        resized = cv2.resize(image, (self.input_size, self.input_size))
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        tensor = torch.from_numpy(rgb).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+        if device is not None:
+            tensor = tensor.to(device)
+
+        with torch.no_grad():
+            logits = self.forward(tensor)
+            probs  = torch.softmax(logits, dim=1)[0]
+
+        class_idx  = int(torch.argmax(probs).item())
+        confidence = float(probs[class_idx].item())
+        class_name = OBJ_CLASSES[class_idx] if class_idx < len(OBJ_CLASSES) else f"class_{class_idx}"
+        all_probs = {OBJ_CLASSES[i]: float(probs[i].item()) for i in range(len(OBJ_CLASSES))}
+
+        return {
+            'class_name': class_name,
+            'confidence': confidence,
+            'class_idx':  class_idx,
+            'all_probs':  all_probs,
+            'reliable':   confidence >= OBJ_CONFIDENCE_MIN,
+            'source':     'efficientnet_b3',
+        }
+
+
+def build_classifier_for_tier(compute_tier: str, num_classes: int = 5):
+    """
+    WHAT: single entry point for tier-aware classifier construction.
+    WHY: CPU tier keeps using the existing, unmodified ArtefactClassifier
+    (MobileNetV2) -- nothing about it changes. GPU tier builds the new
+    EfficientNetB3Classifier instead. Both expose the same predict()
+    return shape, so callers don't need to branch on which one they got
+    beyond knowing input preprocessing differs (see EfficientNetB3Classifier
+    docstring).
+
+    Returns: (model, device, effective_tier). Caller must move input
+    tensors to `device` before inference on the GPU-tier model (the
+    CPU-tier model doesn't need this -- it stays on CPU always).
+    """
+    try:
+        from src.object_detection.device_utils import resolve_device
+        device, effective_tier = resolve_device(compute_tier)
+    except ImportError:
+        device, effective_tier = torch.device("cpu"), "cpu"
+
+    if effective_tier == "gpu":
+        model = EfficientNetB3Classifier(num_classes=num_classes).to(device)
+    else:
+        model = ArtefactClassifier(num_classes=num_classes)
+        device = torch.device("cpu")
+
+    model.eval()
+    return model, device, effective_tier
+
+
 # ═══════════════════════════════════════════════════════════════
 # SECTION 3 — MOBILENETV2 PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
@@ -210,174 +317,26 @@ def load_mobilenet_model(path: Path) -> ArtefactClassifier:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SECTION 4 — YOLOV8 CLASSIFIER (primary)
+# SECTION 4 — (removed) See integration note at Section 10 below.
 # ═══════════════════════════════════════════════════════════════
-
-class YOLOArtefactClassifier:
-    """
-    YOLOv8 nano-based artefact type identification.
-
-    Primary classifier — runs on cropped object regions from the tray.
-    Falls back to MobileNetV2 if confidence is below threshold.
-
-    Modes:
-        fine-tuned: trained on your artefact images (best accuracy)
-        coco:       pretrained YOLOv8 nano with class mapping (no training needed)
-    """
-
-    COCO_TO_ARTEFACT = {
-        'vase':         'pottery',
-        'bowl':         'pottery',
-        'cup':          'pottery',
-        'bottle':       'pottery',
-        'book':         'inscription_fragment',
-        'clock':        'coin',
-        'frisbee':      'coin',
-        'sports ball':  'coin',
-    }
-
-    def __init__(
-        self,
-        model_path: Path = None,
-        fallback_model: ArtefactClassifier = None
-    ):
-        """
-        Args:
-            model_path:     Path to fine-tuned .pt file (None = use COCO)
-            fallback_model: ArtefactClassifier to use when YOLO confidence
-                            is below OBJ_CONFIDENCE_MIN
-        """
-        self.model         = None
-        self.fine_tuned    = False
-        self.model_path    = model_path or YOLO_MODEL_PATH
-        self.fallback      = fallback_model
-
-        self._load_model()
-
-    def _load_model(self):
-        try:
-            from ultralytics import YOLO
-
-            if self.model_path and Path(self.model_path).exists():
-                self.model      = YOLO(str(self.model_path))
-                self.fine_tuned = True
-                logger.info(f"YOLOv8 fine-tuned loaded: {self.model_path}")
-            else:
-                self.model      = YOLO('yolov8n.pt')
-                self.fine_tuned = False
-                logger.info("YOLOv8 nano (COCO fallback) loaded")
-
-        except ImportError:
-            logger.warning("ultralytics not installed — YOLOv8 unavailable")
-            logger.warning("Run: pip install ultralytics")
-            self.model = None
-        except Exception as e:
-            logger.error(f"YOLOv8 load failed: {e}")
-            self.model = None
-
-    def classify_crop(self, crop: np.ndarray) -> dict:
-        """
-        Classify a cropped image of one tray object.
-
-        If YOLO result is unreliable AND a fallback MobileNetV2
-        model is provided, the fallback result is returned instead.
-
-        Args:
-            crop: BGR image of a single object
-
-        Returns:
-            dict:
-                'class_name':  str
-                'confidence':  float
-                'reliable':    bool
-                'source':      str
-        """
-        if self.model is None:
-            return self._try_fallback(crop) or self._unknown_result()
-
-        try:
-            results = self.model(crop, verbose=False, conf=0.25)
-
-            if not results or len(results) == 0:
-                return self._try_fallback(crop) or self._unknown_result()
-
-            result = results[0]
-
-            if self.fine_tuned:
-                parsed = self._parse_finetuned(result)
-            else:
-                parsed = self._parse_coco(result)
-
-            # If not reliable, try MobileNetV2 fallback
-            if not parsed['reliable'] and self.fallback:
-                fallback_result = self.fallback.predict(crop)
-                if fallback_result['confidence'] > parsed['confidence']:
-                    return fallback_result
-
-            return parsed
-
-        except Exception as e:
-            logger.warning(f"YOLOv8 inference error: {e}")
-            return self._try_fallback(crop) or self._unknown_result()
-
-    def _parse_finetuned(self, result) -> dict:
-        boxes = result.boxes
-        if boxes is None or len(boxes) == 0:
-            return self._unknown_result()
-
-        confidences = boxes.conf.cpu().numpy()
-        best_idx    = confidences.argmax()
-        confidence  = float(confidences[best_idx])
-        class_idx   = int(boxes.cls[best_idx].item())
-        class_name  = result.names.get(class_idx, 'other')
-
-        return {
-            'class_name': class_name,
-            'confidence': confidence,
-            'reliable':   confidence >= OBJ_CONFIDENCE_MIN,
-            'source':     'yolo_finetuned'
-        }
-
-    def _parse_coco(self, result) -> dict:
-        boxes = result.boxes
-        if boxes is None or len(boxes) == 0:
-            return self._unknown_result()
-
-        for i in range(len(boxes)):
-            confidence = float(boxes.conf[i].item())
-            class_idx  = int(boxes.cls[i].item())
-            class_name = result.names.get(class_idx, '').lower()
-
-            if class_name in self.COCO_TO_ARTEFACT:
-                return {
-                    'class_name': self.COCO_TO_ARTEFACT[class_name],
-                    'confidence': confidence * 0.7,
-                    'reliable':   confidence >= 0.70,
-                    'source':     'yolo_coco'
-                }
-
-        return {
-            'class_name': 'other',
-            'confidence': 0.40,
-            'reliable':   False,
-            'source':     'yolo_coco'
-        }
-
-    def _try_fallback(self, crop: np.ndarray) -> dict | None:
-        if self.fallback and crop is not None:
-            try:
-                return self.fallback.predict(crop)
-            except Exception:
-                pass
-        return None
-
-    def _unknown_result(self) -> dict:
-        return {
-            'class_name': 'unknown',
-            'confidence': 0.0,
-            'reliable':   False,
-            'source':     'fallback'
-        }
+#
+# INTEGRATION NOTE (Systems Integration Engineer): this section used to
+# contain a SECOND, EARLIER `class YOLOArtefactClassifier` definition.
+# Python silently let the later definition (originally "Section 10",
+# below) win -- meaning this entire block was dead code, never reachable
+# by anything importing this module. Found while merging in GPU-tier
+# support; not something I was looking for, just noticed when I went to
+# graft tier logic into "the" class and found two.
+#
+# The two versions had DIFFERENT behavior, not just duplicate values --
+# this one had real MobileNetV2 fallback wiring (a `fallback_model`
+# constructor param, actually calling `self.fallback.predict(crop)` when
+# YOLO confidence was unreliable) that the surviving one had silently
+# dropped, even though the surviving one's own docstring still claimed
+# "falls back to MobileNetV2 (ArtefactClassifier)" -- a claim that was
+# false in the actual code. That fallback wiring has been merged into the
+# surviving class below rather than left lost. Removed here rather than
+# left as a second, still-dead copy.
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -821,37 +780,55 @@ def train_artefact_classifier(
 if __name__ == "__main__":
     print("Object Detection Module")
     print(f"Classes: {OBJ_CLASSES}")
-    print(f"YOLOv8 model path: {YOLO_MODEL_PATH}")
+    print(f"YOLO11 model path: {YOLO_MODEL_PATH}")
     print(f"MobileNetV2 model path: {OBJ_MODEL_PATH}")
     print("\nTo test tray detection on a webcam frame:")
     print("  cap = cv2.VideoCapture(0)")
     print("  ret, frame = cap.read()")
     print("  objects = detect_objects_in_tray(frame)")
     # ═══════════════════════════════════════════════════════════════
-# SECTION 10 — YOLOV8 TYPE CLASSIFIER
+# SECTION 10 — YOLO11 TYPE CLASSIFIER
 # ═══════════════════════════════════════════════════════════════
 
 class YOLOArtefactClassifier:
     """
-    YOLOv8 nano-based artefact type identification.
+    YOLO11-based artefact type identification.
 
     Runs on CROPPED regions from the tray (output of detect_objects_in_tray).
     Does NOT detect positions — contour detection handles that.
 
     Two modes:
-      1. Pre-trained fallback: uses YOLOv8 nano's built-in object classes
+      1. Pre-trained fallback: uses YOLO11 nano's built-in object classes
          to do rough identification (e.g., "vase" maps to "pottery")
-         Works immediately, no training needed, lower accuracy.
+         Works immediately, no training needed, lower accuracy. This is
+         the code path actually exercised today -- no fine-tuned checkpoint
+         exists yet at YOLO_MODEL_PATH.
 
       2. Fine-tuned mode (recommended): train on your artefact images.
          Use this once you have 50+ images per class.
          Higher accuracy, domain-specific.
 
-    Model file: models/yolov8_artefacts.pt
-    If not found, falls back to MobileNetV2 (ArtefactClassifier).
+    Falls back to MobileNetV2 (ArtefactClassifier) when YOLO confidence is
+    below OBJ_CONFIDENCE_MIN, IF a fallback_model was provided at
+    construction. (Systems Integration Engineer, this pass: this fallback
+    wiring existed in an earlier version of this class that got silently
+    shadowed by a duplicate class definition further down this file --
+    restored here, not new. See the removed-Section-4 note above for the
+    full story.)
+
+    GPU-tier support (this pass): CPU tier stays yolo11n.pt. GPU tier uses
+    yolo11s.pt -- a deliberately conservative step up from nano, not a
+    jump to yolo11m, since this is initial verification, not final
+    tuning. Device resolution goes through device_utils.resolve_device(),
+    which falls back to CPU-tier weights with a loud warning if
+    COMPUTE_TIER=gpu is requested but no CUDA device actually exists --
+    never a silent crash, never GPU-sized weights quietly running on CPU.
     """
 
-    # Mapping from YOLOv8 COCO class names to our artefact classes
+    CPU_TIER_WEIGHTS = "yolo11n.pt"
+    GPU_TIER_WEIGHTS = "yolo11s.pt"
+
+    # Mapping from YOLO11 COCO class names to our artefact classes
     # Used only in fallback mode (before fine-tuning)
     COCO_TO_ARTEFACT = {
         'vase':       'pottery',
@@ -864,36 +841,58 @@ class YOLOArtefactClassifier:
         'sports ball':'coin',
     }
 
-    def __init__(self, model_path: Path = None):
+    def __init__(self, model_path: Path = None, fallback_model: "ArtefactClassifier" = None):
         """
         Args:
             model_path: Path to fine-tuned .pt file.
                         If None or not found, uses COCO fallback.
+            fallback_model: ArtefactClassifier (MobileNetV2) to use when
+                        YOLO confidence is below OBJ_CONFIDENCE_MIN.
         """
-        self.model        = None
-        self.fine_tuned   = False
-        self.model_path   = model_path
+        self.model         = None
+        self.fine_tuned    = False
+        self.model_path    = model_path
+        self.fallback      = fallback_model
+        self.device_str    = "cpu"
+        self.effective_tier = "cpu"
 
         self._load_model()
 
     def _load_model(self):
-        """Load YOLOv8 model — fine-tuned if available, nano otherwise."""
+        """Load YOLO11 model — fine-tuned if available, nano/small otherwise,
+        per the resolved compute tier."""
+        from config import COMPUTE_TIER
+        try:
+            from src.object_detection.device_utils import resolve_device
+            device, effective_tier = resolve_device(COMPUTE_TIER)
+            self.device_str = "cuda:0" if effective_tier == "gpu" else "cpu"
+            self.effective_tier = effective_tier
+        except ImportError:
+            # torch not installed in this environment -- degrade to CPU
+            # tier rather than crash. Real absence of torch/CUDA is a
+            # legitimate "just use CPU" case, not an error.
+            self.device_str = "cpu"
+            self.effective_tier = "cpu"
+
+        tier_weights = self.GPU_TIER_WEIGHTS if self.effective_tier == "gpu" else self.CPU_TIER_WEIGHTS
+
         if self.model_path and Path(self.model_path).exists():
             try:
                 self.model      = YOLO(str(self.model_path))
                 self.fine_tuned = True
-                logger.info(f"YOLOv8 fine-tuned model loaded: {self.model_path}")
+                logger.info(f"YOLO11 fine-tuned model loaded: {self.model_path}")
                 return
             except Exception as e:
                 logger.warning(f"Fine-tuned model load failed: {e}")
 
-        # Fall back to YOLOv8 nano (COCO pretrained)
+        # Fall back to YOLO11 nano/small (COCO pretrained) -- this is the
+        # path actually exercised today, per the note above.
         try:
-            self.model      = YOLO('yolov8n.pt')  # downloads ~6MB if needed
+            self.model      = YOLO(tier_weights)
             self.fine_tuned = False
-            logger.info("YOLOv8 nano (COCO) loaded — using class mapping fallback")
+            logger.info(f"YOLO11 {tier_weights} (COCO) loaded — effective_tier={self.effective_tier}")
         except Exception as e:
-            logger.error(f"YOLOv8 load failed entirely: {e}")
+            logger.error(f"YOLO11 load failed entirely: {e}")
             self.model = None
 
     def classify_crop(self, crop: np.ndarray) -> dict:
@@ -911,26 +910,35 @@ class YOLOArtefactClassifier:
                 'source':      str   — 'yolo_finetuned' or 'yolo_coco' or 'fallback'
         """
         if self.model is None:
-            return self._fallback_result()
+            return self._try_fallback(crop) or self._fallback_result()
 
         try:
             # Run inference on the crop
             # verbose=False suppresses per-frame console output
-            results = self.model(crop, verbose=False, conf=0.25)
+            results = self.model(crop, verbose=False, conf=0.25, device=self.device_str)
 
             if not results or len(results) == 0:
-                return self._fallback_result()
+                return self._try_fallback(crop) or self._fallback_result()
 
             result = results[0]
 
             if self.fine_tuned:
-                return self._parse_finetuned_result(result)
+                parsed = self._parse_finetuned_result(result)
             else:
-                return self._parse_coco_result(result)
+                parsed = self._parse_coco_result(result)
+
+            # If not reliable, try MobileNetV2 fallback (restored wiring —
+            # see class docstring)
+            if not parsed['reliable'] and self.fallback:
+                fallback_result = self._try_fallback(crop)
+                if fallback_result and fallback_result['confidence'] > parsed['confidence']:
+                    return fallback_result
+
+            return parsed
 
         except Exception as e:
-            logger.warning(f"YOLOv8 inference error: {e}")
-            return self._fallback_result()
+            logger.warning(f"YOLO11 inference error: {e}")
+            return self._try_fallback(crop) or self._fallback_result()
 
     def _parse_finetuned_result(self, result) -> dict:
         """
@@ -951,7 +959,7 @@ class YOLOArtefactClassifier:
         return {
             'class_name': class_name,
             'confidence': confidence,
-            'reliable':   confidence >= 0.60,
+            'reliable':   confidence >= OBJ_CONFIDENCE_MIN,
             'source':     'yolo_finetuned'
         }
 
@@ -986,8 +994,18 @@ class YOLOArtefactClassifier:
             'source':     'yolo_coco'
         }
 
+    def _try_fallback(self, crop: np.ndarray) -> dict | None:
+        """Try the MobileNetV2 fallback classifier, if one was provided."""
+        if self.fallback and crop is not None:
+            try:
+                return self.fallback.predict(crop)
+            except Exception as e:
+                logger.warning(f"MobileNetV2 fallback failed: {e}")
+        return None
+
     def _fallback_result(self) -> dict:
-        """Return when model unavailable or inference fails."""
+        """Return when model unavailable or inference fails and no
+        MobileNetV2 fallback is available/succeeds."""
         return {
             'class_name': 'unknown',
             'confidence': 0.0,

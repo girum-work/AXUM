@@ -43,7 +43,7 @@ from loguru import logger
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from config import DATA_DIR, LM_STUDIO_BASE_URL, LM_STUDIO_TIMEOUT_SEC
+from config import DATA_DIR, LM_STUDIO_BASE_URL, LM_STUDIO_TIMEOUT_SEC, COMPUTE_TIER, RESTORATION_MODEL_GPU
 from src.ocr.restoration_prompts import (
     FEW_SHOT_EXAMPLES,
     build_system_prompt,
@@ -313,6 +313,47 @@ class LMStudioRestorationEngine:
         self._initialize()
 
 
+    def _try_gpu_tier_model(self, available_names: list) -> bool:
+        """
+        WHAT: if COMPUTE_TIER=gpu and RESTORATION_MODEL_GPU names a
+        specific model that's actually loaded in LM Studio, prefer it
+        over the generic PREFERRED_MODELS auto-detect list.
+
+        WHY this exists as a separate check rather than just adding
+        RESTORATION_MODEL_GPU to PREFERRED_MODELS: PREFERRED_MODELS is a
+        substring-matched list used regardless of tier -- mixing a
+        GPU-only preference into it would mean a CPU-tier machine that
+        happens to have a similarly-named model loaded could pick it up
+        by accident. This keeps the GPU-tier preference conditional on
+        COMPUTE_TIER actually being "gpu".
+
+        *** SCOPE NOTE, important: this only selects WHICH model name to
+        request. Actual GPU acceleration (how many layers get offloaded)
+        is an LM Studio server-side runtime setting, configured manually
+        in LM Studio's own UI when the model is loaded there -- it is NOT
+        something this HTTP client can control per-request via the chat
+        completions API. Whoever loads the GPU-tier model in LM Studio
+        needs to enable GPU offload there manually; this code only makes
+        sure the RIGHT model name gets requested. ***
+
+        Returns True (and sets self.model_name) if a GPU-tier model was
+        found and selected, False otherwise (caller falls through to the
+        existing PREFERRED_MODELS auto-detect, unchanged).
+        """
+        if COMPUTE_TIER != "gpu" or not RESTORATION_MODEL_GPU:
+            return False
+        if RESTORATION_MODEL_GPU in available_names:
+            self.model_name = RESTORATION_MODEL_GPU
+            logger.info(f"GPU-tier model selected: {self.model_name}")
+            return True
+        logger.warning(
+            f"COMPUTE_TIER=gpu and RESTORATION_MODEL_GPU={RESTORATION_MODEL_GPU!r} "
+            f"set, but that model isn't currently loaded in LM Studio "
+            f"(available: {available_names}) — falling through to normal "
+            f"auto-detect. Load it in LM Studio first if GPU-tier is intended."
+        )
+        return False
+
     def _initialize(self):
 
         """
@@ -352,6 +393,9 @@ class LMStudioRestorationEngine:
                     f"Using specified model:"
                     f"{self.model_name}"
                 )
+
+            elif self._try_gpu_tier_model(available_names):
+                self.available = True
 
             else:
 

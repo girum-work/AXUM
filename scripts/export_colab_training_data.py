@@ -15,8 +15,10 @@ Usage (from project root, venv active):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,6 +29,7 @@ ROOT = Path(__file__).parent.parent
 CSV_NAME = "image_text_pairs_train.csv"
 IMG_DIR = "image_train"
 EXPORT_DIR = ROOT / "exports"
+OCR_EXPORT_FIX_ID = "ctc_filter_alignment_metrics_v1"
 
 CODE_FILES = [
     "config.py",
@@ -121,6 +124,48 @@ def verify_zip_archive(zip_path: Path, data_name: str) -> dict:
     return stats
 
 
+def _pipeline_has_ocr_fixes() -> bool:
+    """True when exported pipeline includes post-0%-bug CTC helpers."""
+    pipeline_src = (ROOT / "src/ocr/pipeline.py").read_text(encoding="utf-8")
+    return (
+        "label_fits_ctc" in pipeline_src
+        and "compute_sequence_metrics" in pipeline_src
+        and "OCR_CTC_SEQ_LEN" in pipeline_src
+    )
+
+
+def write_export_manifest(
+    zip_path: Path,
+    data_root: Path,
+    stats: dict,
+    code_zip: Path | None = None,
+) -> Path:
+    """
+    Write a sidecar JSON so you can tell pre/post OCR-fix exports apart.
+
+    Args:
+        zip_path: Main data archive path
+        data_root: Dataset root that was packed
+        stats: Output from verify_zip_archive()
+        code_zip: Optional code archive path
+
+    Returns:
+        Path to manifest JSON
+    """
+    manifest_path = zip_path.with_suffix(".manifest.json")
+    manifest = {
+        "exported_at_utc": datetime.now(timezone.utc).isoformat(),
+        "ocr_pipeline_fix_id": OCR_EXPORT_FIX_ID,
+        "ocr_fixes_present_in_repo": _pipeline_has_ocr_fixes(),
+        "data_zip": zip_path.name,
+        "data_root": data_root.as_posix(),
+        "code_zip": code_zip.name if code_zip else None,
+        "verification": stats,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest_path
+
+
 def export_data_zip(
     output_path: Path,
     data_root: Path,
@@ -186,6 +231,8 @@ def export_data_zip(
         code_mb = code_zip.stat().st_size / (1024 * 1024)
         print(f"\nCode archive: {code_zip} ({code_mb:.1f} MB)")
         print("  !unzip -q geez_ocr_colab_code.zip -d /content/axum")
+        return code_zip
+    return None
 
 
 def main() -> None:
@@ -230,6 +277,11 @@ def main() -> None:
     export_data_zip(output, args.data_root, args.include_checkpoint, args.include_code)
 
     stats = verify_zip_archive(output, args.data_root.name)
+    code_zip = EXPORT_DIR / "geez_ocr_colab_code.zip" if args.include_code else None
+    manifest = write_export_manifest(output, args.data_root, stats, code_zip)
+    print(f"\nManifest: {manifest}")
+    print(f"  OCR fix ID: {OCR_EXPORT_FIX_ID}")
+    print(f"  Fixes in repo: {_pipeline_has_ocr_fixes()}")
     print("\nVerification:")
     print(f"  OK:              {stats['ok']}")
     print(f"  CSV rows:        {stats['csv_rows']:,}")

@@ -88,12 +88,6 @@ def main() -> int:
     except ImportError as exc:
         errors.append(f"FAIL ReportLab: {exc}")
 
-    try:
-        import sqlalchemy
-        print(f"OK SQLAlchemy: {sqlalchemy.__version__}")
-    except ImportError as exc:
-        errors.append(f"FAIL SQLAlchemy: {exc}")
-
     print("\n" + "=" * 50)
     if errors:
         print(f"FAILED ({len(errors)} errors):")
