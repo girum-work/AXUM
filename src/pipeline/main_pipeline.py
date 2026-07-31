@@ -22,6 +22,7 @@ from loguru import logger
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config import OBJ_CLASSES, SCAN_PHOTOS_DIR
+from src.analysis.fragility_clock import FragilityInputs, run_fragility_clock
 from src.analysis.treatment_advisor import DiagnosticInputs, run_treatment_advisor
 from src.catalogue.records import ObjectRecord
 from src.catalogue.service import CatalogueService
@@ -180,17 +181,38 @@ class MissionPipeline:
         })
 
         class_name = OBJ_CLASSES[(sequence_number - 1) % len(OBJ_CLASSES)]
+
+        # stress_score has no real source yet -- multispectral.py exists
+        # (src/imaging/multispectral.py) but nothing in this pipeline
+        # captures the aligned visible/IR frame pair it needs, and no
+        # quadrant-LED capture sequence exists either. 0.0 (not the old
+        # 0.2) so an unmeasured dimension doesn't silently inflate the
+        # fragility/treatment scores -- see FragilityInputs docs: all
+        # fields default to zero-damage specifically so missing sensors
+        # degrade gracefully rather than bias the result.
+        stress_score = 0.0
+
+        fragility_result = run_fragility_clock(FragilityInputs(
+            artefact_id=object_id,
+            artefact_class=class_name,
+            crack_severity=crack_result.severity_score,
+            salt_risk=salt_result.overall_risk,
+            salt_critical=len(salt_result.critical_zones) > 0,
+            stress_score=stress_score,
+        ))
+        self._emit_fragility_clock(fragility_result)
+
         protocol = run_treatment_advisor(DiagnosticInputs(
             artefact_id=object_id,
             artefact_class=class_name,
             crack_severity=crack_result.severity_score,
             salt_risk=salt_result.overall_risk,
             salt_critical=len(salt_result.critical_zones) > 0,
-            stress_score=0.2,
+            stress_score=stress_score,
             ocr_confidence=0.0,
             has_inscription=class_name in {"coin", "inscription_fragment", "stone_carving"},
             biological_detected=False,
-            years_remaining=30.0,
+            years_remaining=fragility_result.years_remaining,
             active_moisture=False,
         ))
         self._emit("treatment_protocol", protocol.to_dict())
@@ -203,6 +225,7 @@ class MissionPipeline:
             class_source="dry_run" if self.dry_run else "pipeline",
             crack_severity=crack_result.severity_score,
             salt_stage=salt_stage,
+            fragility_years=fragility_result.years_remaining,
             photo_paths=self._photo_paths_for(object_id),
             photo_count=len(self._photo_paths_for(object_id)),
             interventions=[p.name for p in protocol.safe_treatments[:3]],
@@ -307,6 +330,25 @@ class MissionPipeline:
         except Exception as exc:
             logger.debug(f"Dashboard event skipped ({event_name}): {exc}")
 
+    def _emit_fragility_clock(self, result) -> None:
+        """
+        Emit the typed 'fragility_clock' dashboard event.
+
+        Uses server.py's dedicated emit_fragility_clock() (verified
+        signature match: artefact_id, years_remaining, risk_factors) rather
+        than the generic _emit(), so the dashboard's pulsing countdown ring
+        gets the exact payload shape it was built for. Previously only the
+        --demo sequence called this -- a real mission never reached it.
+        """
+        if not self.emit_dashboard:
+            return
+        try:
+            from src.dashboard.server import emit_fragility_clock
+
+            emit_fragility_clock(result.artefact_id, result.years_remaining, result.notes)
+        except Exception as exc:
+            logger.debug(f"Dashboard fragility_clock event skipped: {exc}")
+
 
 def main(argv: list[str] | None = None) -> int:
     """
@@ -331,6 +373,14 @@ def main(argv: list[str] | None = None) -> int:
         generate_mesh=not args.no_mesh,
         emit_dashboard=not args.no_dashboard,
     )
+    if pipeline.emit_dashboard:
+        logger.warning(
+            "Running main_pipeline.py directly with dashboard events enabled. "
+            "If src/dashboard/server.py is running as a SEPARATE process, "
+            "your events will NOT reach it (see server.py --mission for the "
+            "fixed same-process path). Use --no-dashboard for a standalone "
+            "dev run, or launch via: python src/dashboard/server.py --mission"
+        )
     records = pipeline.run()
     logger.success(f"Mission complete: {len(records)} records")
     return 0 if records or args.count == 0 else 1

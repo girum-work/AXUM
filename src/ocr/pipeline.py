@@ -998,7 +998,7 @@ def train_ocr_model(
     logger.info(f"Epochs: {num_epochs}, Batch: {batch_size}, LR: {learning_rate}")
     logger.info(f"Device: CPU (no GPU available)")
     logger.info(
-        f"Flags: weighted_sampler={use_weighted_sampler}, "
+        f"Flags: weighted_sampler={use_weighted_sampler}, 
         f"beam_val={use_beam_val_decode}, stone_aug={use_stone_augment}, "
         f"adaptive_bin={use_adaptive_binarize}"
     )

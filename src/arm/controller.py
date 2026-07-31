@@ -17,6 +17,7 @@ from typing import Any
 
 import requests
 import serial
+import threading
 from loguru import logger
 from serial.tools import list_ports
 
@@ -58,6 +59,16 @@ class ArduinoSerial:
         self.timeout = timeout
         self.retries = retries
         self.serial: serial.Serial | None = None
+        # Guards the write/read transaction below. Needed because
+        # DriveController's watchdog thread (below) calls send_command()
+        # from a background thread independently of whatever thread issued
+        # the actual drive/stop command -- without this lock, two threads
+        # writing to the same serial connection concurrently can interleave
+        # bytes or read each other's response. Merged in from a
+        # collected copy of this file (Robotics Software Engineer) that
+        # already had DriveController + this lock; this integration pass's
+        # own version had neither.
+        self._io_lock = threading.Lock()
         if connect:
             self.connect()
 
@@ -148,10 +159,11 @@ class ArduinoSerial:
 
         for attempt in range(self.retries + 1):
             try:
-                self.serial.reset_input_buffer()
-                self.serial.write(payload)
-                self.serial.flush()
-                response = self.serial.readline().decode("utf-8", errors="replace").strip()
+                with self._io_lock:
+                    self.serial.reset_input_buffer()
+                    self.serial.write(payload)
+                    self.serial.flush()
+                    response = self.serial.readline().decode("utf-8", errors="replace").strip()
                 if not response:
                     last_error = "empty response"
                     continue
@@ -189,6 +201,77 @@ class ArduinoSerial:
             logger.warning(f"Could not parse Arduino STATUS: {response}")
             return {}
 
+    def gps_status(self) -> "GPSFix":
+        """
+        Query the Arduino's GPS_STATUS command and return a parsed fix.
+
+        Format: JSON, matching STATUS's pattern -- {"fix": bool, "lat":
+        float, "lon": float, "sats": int}. Outdoor/transport-phase
+        navigation only -- indoor arena navigation still uses ArUco via
+        the Pi, unrelated to this.
+
+        GPS is polled on request, not pushed continuously by firmware --
+        callers are responsible for calling this at whatever cadence they
+        need fresh data. NEO-7M modules update at 1Hz by default; polling
+        faster than that doesn't get fresher data, just adds serial
+        traffic for no benefit.
+
+        Returns:
+            GPSFix with has_fix=False and lat/lng/satellites=None if no
+            fix is available or the response doesn't parse, or a
+            populated GPSFix if a fix exists. Never raises -- a malformed
+            GPS response shouldn't crash a caller any more than a
+            malformed STATUS response would.
+        """
+        response = self.send_command("GPS_STATUS")
+        try:
+            payload = json.loads(response)
+        except json.JSONDecodeError:
+            logger.warning(f"Could not parse Arduino GPS_STATUS: {response!r}")
+            return GPSFix(has_fix=False)
+
+        if not payload.get("fix"):
+            return GPSFix(has_fix=False)
+
+        try:
+            return GPSFix(
+                has_fix=True,
+                latitude=float(payload["lat"]),
+                longitude=float(payload["lon"]),
+                satellites=int(payload["sats"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning(f"Could not parse Arduino GPS_STATUS fields: {response!r}")
+            return GPSFix(has_fix=False)
+
+    def cam_arm_trigger(self) -> str:
+        """
+        Trigger the arm-angle ESP32-CAM via its Serial2 UART link to the
+        Mega. This only sends the trigger -- the resulting JPEG still needs
+        to be fetched separately over WiFi HTTP (CameraInterface), same as
+        the undercarriage camera. See axum_rover.ino integration note #6.
+        """
+        return self.send_command("CAM_ARM_TRIGGER", expect_prefix="OK:")
+
+
+@dataclass
+class GPSFix:
+    """
+    Parsed result of a GPS_STATUS query.
+
+    Args:
+        has_fix: Whether the module currently reports a valid position.
+        latitude: Decimal degrees, None if has_fix is False.
+        longitude: Decimal degrees, None if has_fix is False.
+        satellites: Satellite count contributing to the fix, None if
+            has_fix is False.
+    """
+
+    has_fix: bool
+    latitude: float | None = None
+    longitude: float | None = None
+    satellites: int | None = None
+
 
 class ArmController:
     """
@@ -200,6 +283,16 @@ class ArmController:
 
     def __init__(self, arduino: ArduinoSerial | None = None) -> None:
         self.arduino = arduino or ArduinoSerial()
+        # Tracks the last commanded joint angles so callers can query
+        # current arm state without a round-trip to firmware. For AI & CV
+        # Engineer's hand-eye calibration (AX=XB solve), which needs each
+        # calibration image paired with the arm's pose at capture time.
+        # NOTE: this is the last COMMANDED state, not a verified read-back
+        # from the servos themselves -- firmware doesn't report actual
+        # servo position, only accepts commands. If a servo stalls or
+        # doesn't reach the commanded angle, this will be wrong and there
+        # is currently no way to detect that.
+        self._last_angles: tuple[int, int, int, int] | None = None
 
     def go_pose(self, name: str) -> str:
         """Move the arm to a named firmware pose such as PARK or HOVER_TRAY."""
@@ -208,15 +301,46 @@ class ArmController:
     def set_angles(self, s0: int, s1: int, s2: int, s3: int) -> str:
         """Move the four arm joints to explicit servo angles in degrees."""
         values = [self._clamp_angle(v) for v in (s0, s1, s2, s3)]
-        return self.arduino.send_command(
+        result = self.arduino.send_command(
             f"ARM:{values[0]},{values[1]},{values[2]},{values[3]}",
             expect_prefix="OK:",
         )
+        self._last_angles = (values[0], values[1], values[2], values[3])
+        return result
 
-    def set_grip(self, angle: int) -> str:
-        """Set the gripper servo angle while preserving slow firmware motion."""
+    def get_current_angles(self) -> tuple[int, int, int, int] | None:
+        """
+        Return the last commanded (s0, s1, s2, s3) joint angles, or None
+        if set_angles() has never been called on this instance (e.g. only
+        go_pose() has been used so far -- named poses don't currently
+        report their underlying joint angles back to this layer).
+
+        Returns joint angles, not Cartesian end-effector pose -- there is
+        no forward kinematics in this codebase. Poses are a pre-computed
+        lookup table on the firmware side, not derived from a kinematic
+        model.
+        """
+        return self._last_angles
+
+    def grip_pull(self) -> str:
+        """
+        Engage the syringe-actuated vacuum gripper (pull = grip).
+
+        Matches firmware's GRIP:PULL command. The old numeric GRIP:<angle>
+        protocol is retired in firmware as of this integration pass — this
+        method (not set_grip) is the only supported way to close the
+        gripper now.
+        """
+        return self.arduino.send_command("GRIP:PULL", expect_prefix="OK:")
+
+    def grip_release(self) -> str:
+        """Release the syringe-actuated vacuum gripper. Matches GRIP:RELEASE."""
+        return self.arduino.send_command("GRIP:RELEASE", expect_prefix="OK:")
+
+    def camera_tilt(self, angle: int) -> str:
+        """Set the rear-arm camera tilt servo angle in degrees (0-180)."""
         return self.arduino.send_command(
-            f"GRIP:{self._clamp_angle(angle)}",
+            f"CAMERA_TILT:{self._clamp_angle(angle)}",
             expect_prefix="OK:",
         )
 
@@ -224,14 +348,14 @@ class ArmController:
         """Run the standard tray pick sequence used by the demo mission."""
         self.go_pose("HOVER_TRAY")
         self.go_pose("GRIP_TRAY")
-        self.set_grip(90)
+        self.grip_pull()
         self.go_pose("LIFT_CLEAR")
 
     def place_on_turntable(self) -> None:
         """Run the standard placement sequence onto the scan turntable."""
         self.go_pose("HOVER_TABLE")
         self.go_pose("PLACE_TABLE")
-        self.set_grip(160)
+        self.grip_release()
         self.go_pose("LIFT_TABLE")
 
     def park(self) -> None:
@@ -242,6 +366,81 @@ class ArmController:
     def _clamp_angle(value: int) -> int:
         """Clamp servo angle to the firmware-supported 0-180 range."""
         return max(0, min(180, int(value)))
+
+
+class DriveController:
+    """
+    Differential drivetrain abstraction over the Arduino's DRIVE command.
+
+    Args:
+        arduino: Shared ArduinoSerial instance.
+        watchdog_seconds: Auto-stop if no drive command refreshes within
+            this window. Keep this short — it should feel instant to a
+            person holding a button, not like a delay.
+    """
+
+    def __init__(self, arduino: "ArduinoSerial", watchdog_seconds: float = 0.4) -> None:
+        self.arduino = arduino
+        self.watchdog_seconds = watchdog_seconds
+        self._lock = threading.Lock()
+        self._last_command_time = 0.0
+        self._stopped = True
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
+
+    def drive(self, left_speed: int, right_speed: int) -> str:
+        """
+        Send raw differential speeds. Call repeatedly while a direction is
+        held — a single call will be auto-stopped by the watchdog.
+
+        Args:
+            left_speed: -255 to 255.
+            right_speed: -255 to 255.
+        """
+        left = self._clamp_speed(left_speed)
+        right = self._clamp_speed(right_speed)
+        with self._lock:
+            self._last_command_time = time.monotonic()
+            self._stopped = False
+        return self.arduino.send_command(f"DRIVE:{left},{right}", expect_prefix="OK:")
+
+    def forward(self, speed: int = 150) -> str:
+        return self.drive(speed, speed)
+
+    def backward(self, speed: int = 150) -> str:
+        return self.drive(-speed, -speed)
+
+    def turn_left(self, speed: int = 120) -> str:
+        return self.drive(-speed, speed)
+
+    def turn_right(self, speed: int = 120) -> str:
+        return self.drive(speed, -speed)
+
+    def stop(self) -> str:
+        """Immediate stop. Never blocked by the watchdog lock semantics."""
+        with self._lock:
+            self._stopped = True
+        return self.arduino.send_command("STOP", expect_prefix="OK:")
+
+    def _watchdog_loop(self) -> None:
+        """Background thread: auto-stop if a drive command isn't refreshed."""
+        while True:
+            time.sleep(0.05)
+            with self._lock:
+                stopped = self._stopped
+                elapsed = time.monotonic() - self._last_command_time
+            if not stopped and elapsed > self.watchdog_seconds:
+                try:
+                    self.arduino.send_command("STOP", expect_prefix="OK:")
+                    logger.debug("DriveController watchdog: auto-stopped (no refresh)")
+                except Exception as exc:
+                    logger.warning(f"DriveController watchdog STOP failed: {exc}")
+                with self._lock:
+                    self._stopped = True
+
+    @staticmethod
+    def _clamp_speed(value: int) -> int:
+        return max(-255, min(255, int(value)))
 
 
 @dataclass
@@ -374,6 +573,47 @@ class TurntableController:
             frames.append(CapturedFrame(path=path, index=index, angle_degrees=index * degrees))
 
         return frames
+
+
+class LightingController:
+    """
+    Photometric-stereo quadrant LEDs + UV fluorescence LED.
+
+    Args:
+        arduino: Shared ArduinoSerial instance.
+
+    Note: matches firmware's LED:QUAD:<N|E|S|W|OFF> and LED:UV:ON/OFF
+    commands, added in this integration pass alongside the firmware
+    rewrite. Nothing in main_pipeline.py calls this yet — photometric
+    stereo / multispectral capture sequences still need to be wired to
+    fire the right quadrant/UV LED before each frame, once those analysis
+    modules themselves exist (see ER-11).
+    """
+
+    def __init__(self, arduino: ArduinoSerial | None = None) -> None:
+        self.arduino = arduino or ArduinoSerial()
+
+    def quadrant(self, which: str) -> str:
+        """
+        Fire one photometric-stereo quadrant LED, all others off.
+
+        Args:
+            which: One of "N", "E", "S", "W", or "OFF" to turn all off.
+        """
+        which = which.upper()
+        if which not in {"N", "E", "S", "W", "OFF"}:
+            raise ValueError(f"Unknown LED quadrant: {which!r}")
+        return self.arduino.send_command(f"LED:QUAD:{which}", expect_prefix="OK:")
+
+    def quadrants_off(self) -> str:
+        """Turn all four quadrant LEDs off."""
+        return self.quadrant("OFF")
+
+    def uv(self, on: bool) -> str:
+        """Turn the UV fluorescence LED on or off."""
+        return self.arduino.send_command(
+            f"LED:UV:{'ON' if on else 'OFF'}", expect_prefix="OK:"
+        )
 
 
 class MeshroomInterface:

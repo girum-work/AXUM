@@ -2,7 +2,7 @@
 AXUM ROVER — Artefact Classification Image Downloader
 ======================================================
 Populates data/artefact_classes/ with open-licence museum images for
-MobileNetV2 / YOLOv8 artefact classifier training (turntable top-down).
+MobileNetV2 / YOLO11 artefact classifier training (turntable top-down).
 
 Approved APIs (priority order):
   1. Wikimedia Commons (CC BY, CC BY-SA, CC0, public domain)

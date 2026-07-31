@@ -111,7 +111,7 @@ pip install ultralytics datasets huggingface_hub pyarrow pandas openai
 |---------|----------|
 | `opencv-python` | Crack detection, imaging, camera frames |
 | `torch` / `torchvision` | OCR, classifier, all ML |
-| `ultralytics` | YOLOv8 artefact + coin detection |
+| `ultralytics` | YOLO11 artefact + coin detection |
 | `flask` / `flask-socketio` | Dashboard server |
 | `pyserial` | Arduino communication (when `controller.py` exists) |
 | `reportlab` / `qrcode` | PDF catalogue |
@@ -207,8 +207,8 @@ The repo may ship with an **empty** `models/` folder. You must train or copy wei
 |------|----------------|
 | `models/geez_ocr.pth` | `python scripts/train_ocr.py` (hours on CPU) |
 | `models/artefact_classifier.pth` | `python scripts/train_classifier.py` |
-| `models/yolov8_artefacts.pt` | `python scripts/train_yolov8.py` |
-| `models/yolov8_coins.pt` | `python scripts/train_yolov8_coins.py` |
+| `models/yolo11_artefacts.pt` | `python scripts/train_yolo11.py` |
+| `models/yolo11_coins.pt` | `python scripts/train_yolo11_coins.py` |
 
 ### Demo data (works without hardware)
 

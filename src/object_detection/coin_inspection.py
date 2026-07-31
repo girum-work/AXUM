@@ -126,7 +126,7 @@ class CoinInspectionPipeline:
     def __init__(self, model_path: Path | None = None):
         """
         Args:
-            model_path: Path to yolov8_coins.pt (None = config default)
+            model_path: Path to yolo11_coins.pt (None = config default)
         """
         self.model_path = Path(model_path or YOLO_COIN_MODEL_PATH)
         self.model = None
@@ -138,7 +138,7 @@ class CoinInspectionPipeline:
         if not self.model_path.exists():
             logger.info(
                 f"Coin YOLO not found at {self.model_path} — "
-                "using wear heuristics only. Train with train_yolov8_coins.py"
+                "using wear heuristics only. Train with train_yolo11_coins.py"
             )
             return
         try:

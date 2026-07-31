@@ -114,7 +114,7 @@ AXUM/
 │   ├── arm/controller.py   — ArduinoSerial, ArmController,
 │   │                         TurntableController, CameraInterface
 │   ├── crack_detection/detector.py
-│   ├── object_detection/detector.py  — MobileNetV2 + YOLOv8
+│   ├── object_detection/detector.py  — MobileNetV2 + YOLO11
 │   ├── ocr/
 │   │   ├── model.py        — CNN+LSTM+CTC architecture
 │   │   ├── pipeline.py     — training, inference, dataset loader
@@ -141,7 +141,7 @@ AXUM/
 ├── scripts/
 │   ├── train_ocr.py
 │   ├── train_classifier.py
-│   ├── train_yolov8.py
+│   ├── train_yolo11.py
 │   ├── download_datasets.py
 │   └── extract_cached_dataset.py
 ├── arduino/
@@ -164,7 +164,7 @@ AXUM/
 opencv-python, numpy, Pillow, matplotlib, torch (2.12.0+cpu),
 torchvision, scikit-learn, tqdm, albumentations, pyserial,
 flask, flask-socketio, requests, reportlab, qrcode, sqlalchemy,
-python-dotenv, loguru, pyttsx3, imutils, ultralytics (YOLOv8),
+python-dotenv, loguru, pyttsx3, imutils, ultralytics (YOLO11),
 datasets (4.8.5), huggingface_hub, pyarrow (24.0.0), scipy (1.13.1)
 
 ### Not yet installed
@@ -202,7 +202,7 @@ Use num_workers=0 in all DataLoaders (Windows multiprocessing issue).
 - File: src/object_detection/detector.py (ArtefactClassifier class)
 - Status: not trained, no images collected yet
 
-### Model 4: YOLOv8 Nano
+### Model 4: YOLO11 Nano
 - Used for artefact type ID after contour detection finds positions
 - File: src/object_detection/detector.py (YOLOArtefactClassifier)
 - Status: not trained, falls back to COCO pretrained

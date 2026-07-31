@@ -25,10 +25,13 @@ Run: python scripts/merge_datasets.py
 
 import csv
 import shutil
+import sys
 from pathlib import Path
 
 from loguru import logger
 from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Paths ──────────────────────────────────────────────────────
 HHD_DIR     = Path("data/geez_characters/train_raw")
@@ -50,6 +53,8 @@ def merge_datasets():
     logger.info("="*60)
     logger.info("AXUM — Dataset Merger")
     logger.info("="*60)
+
+    from src.ocr.pipeline import label_fits_ctc
 
     # ── Setup output dirs ──────────────────────────────────────
     IMG_OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -91,8 +96,8 @@ def merge_datasets():
             hhd_skipped += 1
             continue
 
-        # Skip labels too long for CTC (input_length must > label_length)
-        if len(label) > 25:
+        # Skip labels that cannot fit in the model's 26-timestep CTC budget
+        if not label_fits_ctc(label):
             hhd_skipped += 1
             continue
 

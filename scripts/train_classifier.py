@@ -57,4 +57,4 @@ train_artefact_classifier(
 )
 
 print(f"\n✓ Model saved: {SAVE_PATH}")
-print(f"\nNext: python scripts/train_yolov8.py")
+print(f"\nNext: python scripts/train_yolo11.py")

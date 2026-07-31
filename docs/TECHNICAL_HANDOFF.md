@@ -112,8 +112,8 @@ The **`ObjectRecord`** dataclass (`catalogue/records.py`) accumulates fields as 
 | Ge'ez OCR | CNN + BiLSTM + CTC | `scripts/train_ocr.py` | ❌ Not trained |
 | LLM restoration | Qwen2.5-1.5B (fine-tune on Colab) | `scripts/export_restoration_colab.py` | ❌ Not fine-tuned |
 | Artefact classifier | MobileNetV2 | `scripts/train_classifier.py` | ❌ Not trained |
-| YOLO artefacts | YOLOv8n | `scripts/train_yolov8.py` | ❌ Not trained |
-| YOLO coins | YOLOv8n (7 classes) | `scripts/train_yolov8_coins.py` | ❌ Not trained |
+| YOLO artefacts | YOLO11n | `scripts/train_yolo11.py` | ❌ Not trained |
+| YOLO coins | YOLO11n (7 classes) | `scripts/train_yolo11_coins.py` | ❌ Not trained |
 | Crack detector | OpenCV only | None | N/A |
 
 **Dataset status:**
@@ -190,8 +190,8 @@ Your teammate can develop and test these **today**:
 |--------|------|--------|
 | `scripts/train_ocr.py` | OCR data ready | `models/geez_ocr.pth` |
 | `scripts/train_classifier.py` | 500+ artefact images | `models/artefact_classifier.pth` |
-| `scripts/train_yolov8.py` | Labelled detection data | `models/yolov8_artefacts.pt` |
-| `scripts/train_yolov8_coins.py` | Coin images collected | `models/yolov8_coins.pt` |
+| `scripts/train_yolo11.py` | Labelled detection data | `models/yolo11_artefacts.pt` |
+| `scripts/train_yolo11_coins.py` | Coin images collected | `models/yolo11_coins.pt` |
 
 ### Demo / testing
 | Script | When |

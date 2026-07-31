@@ -96,6 +96,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-train-batches", type=int, default=None)
     parser.add_argument("--max-val-batches", type=int, default=None)
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="Training device (use cuda on Colab GPU)",
+    )
     return parser.parse_args()
 
 
@@ -119,4 +125,5 @@ if __name__ == "__main__":
         weighted_sampler_fn=create_weighted_sampler,
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
+        device=args.device,
     )

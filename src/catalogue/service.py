@@ -48,6 +48,11 @@ class CatalogueService:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.generator = CatalogueGenerator(self.output_dir)
         self.grouper = FragmentGrouper()
+        # Hydrate from disk so a fresh process (e.g. scripts/register_mesh.py,
+        # which runs as a new process every invocation) doesn't silently
+        # regenerate the PDF from only this session's entries, dropping every
+        # previously-registered artefact whose JSON already exists on disk.
+        self.generator.entries = self.load_all_objects()
 
     def register_object(
         self,
