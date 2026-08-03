@@ -16,6 +16,7 @@ Author: Axum Rover Team
 """
 
 import json
+import random
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,9 @@ from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from src.object_detection.device_utils import resolve_device
 from config import (
+    COMPUTE_TIER,
     DATA_DIR,
     INSCRIPTIONS_JSON,
     NUM_GEEZ_CLASSES,
@@ -615,6 +618,8 @@ class HHDEthiopicDataset(Dataset):
             with open(csv_path, "r", encoding="utf-8") as f:
                 rows = list(csv.reader(f))
 
+            rng = random.Random(42)  # fixed seed — identical order for train/val calls, no leakage
+            rng.shuffle(rows)
             split_idx = int(len(rows) * 0.85)
             if self.split == "train":
                 rows = rows[:split_idx]
@@ -667,7 +672,9 @@ class HHDEthiopicDataset(Dataset):
                 + list(char_dir.glob("*.jpeg"))
             )
 
-            # Split train/val 85%/15%
+            # Split train/val 85%/15% (shuffled — fixed seed, matches CSV-path split logic)
+            rng = random.Random(42)
+            rng.shuffle(images)
             split_idx = int(len(images) * 0.85)
             if self.split == "train":
                 images = images[:split_idx]
@@ -960,6 +967,7 @@ def train_ocr_model(
     weighted_sampler_fn=None,
     max_train_batches: int = None,
     max_val_batches: int = None,
+    device: str = None,
 ) -> dict:
     """
     Train the Ge'ez OCR model using CTC loss.
@@ -977,6 +985,12 @@ def train_ocr_model(
         weighted_sampler_fn: Callable(dataset) → sampler (from train_ocr.py)
         max_train_batches: Optional cap for ablation speed (None = full epoch)
         max_val_batches: Optional cap for ablation speed (None = full val)
+        device: Optional explicit override ("cpu" or "cuda"), e.g. from
+            train_ocr.py's --device CLI flag. If provided, takes precedence
+            over COMPUTE_TIER. If None (the default, e.g. when called from
+            somewhere that doesn't pass it), falls back to resolving
+            COMPUTE_TIER from config — same tier-based pattern used by the
+            classifier/YOLO/restoration paths.
 
     Returns:
         dict with epoch_metrics list and best_val_loss
@@ -990,15 +1004,32 @@ def train_ocr_model(
     if use_adaptive_binarize is None:
         use_adaptive_binarize = OCR_USE_ADAPTIVE_BINARIZE
 
+    if device is not None:
+        # Explicit override requested (e.g. train_ocr.py's --device flag).
+        # Same safe-fallback philosophy as resolve_device(): never silently
+        # try to run on a CUDA device that isn't actually there.
+        if device == "cuda" and not torch.cuda.is_available():
+            logger.warning(
+                "--device cuda requested but no CUDA device is available — "
+                "falling back to CPU."
+            )
+            resolved_device, effective_tier = torch.device("cpu"), "cpu"
+        else:
+            resolved_device = torch.device(device)
+            effective_tier = "gpu" if device == "cuda" else "cpu"
+    else:
+        resolved_device, effective_tier = resolve_device(COMPUTE_TIER)
+    device = resolved_device  # unify downstream variable name regardless of which path set it
+
     logger.info("=" * 60)
     logger.info("STARTING GE'EZ OCR MODEL TRAINING")
     logger.info("=" * 60)
     logger.info(f"Data:   {data_dir}")
     logger.info(f"Model:  {save_path}")
     logger.info(f"Epochs: {num_epochs}, Batch: {batch_size}, LR: {learning_rate}")
-    logger.info(f"Device: CPU (no GPU available)")
+    logger.info(f"Device: {device} (effective_tier={effective_tier})")
     logger.info(
-        f"Flags: weighted_sampler={use_weighted_sampler}, 
+        f"Flags: weighted_sampler={use_weighted_sampler}, "
         f"beam_val={use_beam_val_decode}, stone_aug={use_stone_augment}, "
         f"adaptive_bin={use_adaptive_binarize}"
     )
@@ -1056,7 +1087,7 @@ def train_ocr_model(
     )
 
     # ── Model ─────────────────────────────────────────────────
-    model = GeezOCRModel(num_classes=len(GEEZ_CHARSET))
+    model = GeezOCRModel(num_classes=len(GEEZ_CHARSET)).to(device)
 
     # ── CTC Loss ──────────────────────────────────────────────
     # blank=BLANK_IDX: which class index represents the blank token
@@ -1088,7 +1119,7 @@ def train_ocr_model(
     print(f"\nTraining on {len(train_dataset)} images...")
     print(
         f"Estimated time per epoch: "
-        f"~{len(train_loader) * batch_size // 60} minutes on CPU"
+        f"~{len(train_loader) * batch_size // 60} minutes on {effective_tier.upper()}"
     )
     print("Press Ctrl+C to stop (best model is saved automatically)\n")
 
@@ -1103,6 +1134,14 @@ def train_ocr_model(
             if max_train_batches is not None and batch_idx >= max_train_batches:
                 break
             optimizer.zero_grad()
+
+            # Only images move to device — labels/input_lengths/label_lengths
+            # stay on CPU. This is the correct, documented pattern for
+            # nn.CTCLoss, not a workaround: its length tensors are expected
+            # on CPU regardless of what device log_probs/targets are on.
+            # Moving them would risk the exact device-mismatch gotcha CTC
+            # is known for, not prevent it.
+            images = images.to(device)
 
             # Forward pass
             # log_probs shape: (seq_len, batch, num_classes)
@@ -1153,6 +1192,7 @@ def train_ocr_model(
             ):
                 if max_val_batches is not None and batch_idx >= max_val_batches:
                     break
+                images = images.to(device)
                 log_probs = model(images)
                 loss = ctc_loss(log_probs, labels, input_lengths, label_lengths)
 

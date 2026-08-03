@@ -573,8 +573,19 @@ def save_ocr_model(model: GeezOCRModel, path: Path):
     """Save OCR model weights and charset info."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Build a CPU-mapped state dict regardless of what device the model
+    # trained on. This is NOT the same bug as before (model.to("cpu") used
+    # to mutate the live training model in place, breaking the next epoch's
+    # forward pass) — that specific bug is fixed, this call site no longer
+    # does that. But this function was still saving model.state_dict()
+    # directly, which means a checkpoint trained on GPU would be saved with
+    # CUDA tensors — loadable, but only with an explicit map_location='cpu'
+    # downstream, which the rover's CPU-only deployment can't be assumed to
+    # always specify. Building the state dict as CPU tensors here makes the
+    # checkpoint portable by construction, independent of training device.
+    cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}
     torch.save({
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': cpu_state,
         'num_classes':      model.num_classes,
         'charset_size':     len(GEEZ_CHARSET),
     }, path)

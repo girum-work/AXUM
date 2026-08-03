@@ -451,7 +451,8 @@ def run_meshroom_batch(
     gracefully during development.
 
     Args:
-        photo_dir:   Directory containing ``.jpg`` / ``.png`` photos
+        photo_dir:   Directory containing .jpg/.jpeg/.png photos
+                     (case-insensitive extension match)
         output_dir:  Meshroom output/cache directory
         timeout_sec: Subprocess timeout in seconds
 
@@ -467,7 +468,22 @@ def run_meshroom_batch(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    images = list(photo_dir.glob("*.jpg")) + list(photo_dir.glob("*.png"))
+    # Case-insensitive, includes .jpeg -- the previous version
+    # (`glob("*.jpg") + glob("*.png")`) only matched lowercase .jpg/.png.
+    # Found this while integrating a real test dataset (openMVG's Sceaux
+    # Castle benchmark) whose images are all uppercase .JPG -- the old
+    # glob would find zero images and raise "No photos in {photo_dir}"
+    # on any case-sensitive filesystem (Linux -- plausible for a rented
+    # GPU studio machine). It happened to work on Windows by accident,
+    # since NTFS glob matching is case-insensitive there, which is
+    # exactly the kind of "works on my machine" bug that doesn't show up
+    # until it's run somewhere else. Real camera JPEGs are commonly
+    # uppercase .JPG by default, so this wasn't a hypothetical edge case.
+    photo_extensions = {".jpg", ".jpeg", ".png"}
+    images = sorted(
+        p for p in photo_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in photo_extensions
+    )
     if not images:
         raise FileNotFoundError(f"No photos in {photo_dir}")
 
