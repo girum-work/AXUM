@@ -12,6 +12,59 @@ data/
 *.h5
 
 .zed/
+# ── Python ─────────────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+smoketest_env/
+
+# ── Model weights (never committed -- always downloaded or trained fresh) ──
+*.pt
+*.pth
+*.ckpt
+*.h5
+models/
+
+# ── Colab exports ──────────────────────────────────────────────
+exports/*.zip
+
+# ── Editor / tool configs (personal, not team-shared) ──────────
+.zed/
+.vscode/
+.cursor/
+
+# ── Runtime logs ───────────────────────────────────────────────
+logs/
+*.log
+
+# ── Generated mission/scan output (regenerated every run, not source) ──
+# Exception: scans/photos/TEST-*/ -- known-good photogrammetry test fixtures
+# (e.g. TEST-SCEAUX), committed on purpose so Meshroom/GPU-tier testing
+# isn't gated on having a real AXUM capture ready. Everything else under
+# scans/ (real AXUM-OBJ-* mission captures, meshes, meshroom_cache) stays
+# ignored -- regenerated per mission, not source content.
+scans/*
+!scans/photos/
+scans/photos/*
+!scans/photos/TEST-*
+data/catalogue/
+data/databases/conservation_kb.json
+data/databases/fragment_groups.json
+
+# ── Fetched corpus data (regenerable via scripts/fetch_ethiopic_corpus.py,
+#    large, not hand-authored -- re-fetch rather than commit) ──
+data/restoration_corpus_raw/
+data/restoration_corpus_chunked.json
+
+# ── IMPORTANT: everything above under data/ is generated/fetched and
+#    excluded on purpose. data/databases/kb/*.json is NOT excluded --
+#    those 7 files are hand-authored conservation-science source content
+#    (Heritage & Conservation Specialist), not derived output. The
+#    previous .gitignore had a blanket `data/` rule that would have
+#    silently dropped these on the next push -- fixed by being specific
+#    about what's generated instead of ignoring the whole directory.
 
 models/
 
