@@ -954,6 +954,52 @@ def verify_dataset(data_dir: str) -> dict:
 # ═══════════════════════════════════════════════════════════════
 
 
+def _save_resume_checkpoint(
+    checkpoint_path: Path,
+    epoch: int,
+    model: "GeezOCRModel",
+    optimizer,
+    scheduler,
+    best_val_loss: float,
+    patience_counter: int,
+    epoch_metrics: list,
+) -> None:
+    """
+    WHAT: saves FULL training state (model, optimizer, scheduler, epoch,
+    early-stopping counters, metric history) for exact-resume, not just
+    model weights.
+    WHY separate from save_ocr_model(): save_ocr_model() saves the BEST
+    model's weights only, for deployment/inference — that behavior is
+    unchanged. This checkpoint is for exact training-state resume after an
+    interrupted session (e.g. a Kaggle kernel dying mid-run) and needs the
+    optimizer/scheduler state too, or resuming would silently NOT reproduce
+    the same training trajectory.
+    WHY atomic write (tmp file + rename): a checkpoint saved every single
+    epoch is a real risk surface — if the process dies mid-write (exactly
+    the kind of interruption this exists to protect against), a partial
+    file must never become the thing a resume attempt tries to load.
+    Writing to a .tmp path first and renaming only after a full successful
+    write means the real checkpoint path is always either the last
+    complete checkpoint or absent, never corrupted.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint_path.with_suffix(".tmp")
+
+    cpu_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
+    torch.save({
+        "epoch": epoch,
+        "model_state_dict": cpu_model_state,
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "best_val_loss": best_val_loss,
+        "patience_counter": patience_counter,
+        "epoch_metrics": epoch_metrics,
+    }, tmp_path)
+
+    tmp_path.replace(checkpoint_path)  # atomic on POSIX and Windows (NTFS)
+
+
 def train_ocr_model(
     data_dir: str,
     save_path: Path,
@@ -1101,6 +1147,14 @@ def train_ocr_model(
     )
 
     # ── LR Scheduler ──────────────────────────────────────────
+    # IMPORTANT: built with the FULL original num_epochs regardless of
+    # whether this run is resuming partway through. OneCycleLR computes a
+    # fixed total_steps = epochs * steps_per_epoch ONCE at construction —
+    # if this were instead built using only the epochs remaining after a
+    # resume, the learning-rate curve would desync from where it actually
+    # was and silently produce a wrong schedule. The correct way to resume
+    # a OneCycleLR schedule is: construct it identically to a fresh run,
+    # then restore its internal step counter via load_state_dict() below.
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=learning_rate * 10,
@@ -1115,6 +1169,34 @@ def train_ocr_model(
     patience_counter = 0
     early_stop_patience = 10
     epoch_metrics = []
+    start_epoch = 0
+
+    # ── Resume from checkpoint if one exists ───────────────────
+    # WHAT: full-state resume (model + optimizer + scheduler + counters),
+    # not just reloading model weights — reloading weights alone would NOT
+    # reproduce the same training trajectory, since Adam's per-parameter
+    # moment estimates and OneCycleLR's step position both have real state.
+    # WHY this matters for Kaggle specifically: a killed kernel loses
+    # everything in memory: this makes an interrupted run resumable at
+    # exactly where it left off instead of losing all progress since the
+    # last full run.
+    checkpoint_path = save_path.parent / f"{save_path.stem}_resume_checkpoint.pth"
+    if checkpoint_path.exists():
+        logger.info(f"Found resume checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        best_val_loss = checkpoint["best_val_loss"]
+        patience_counter = checkpoint["patience_counter"]
+        epoch_metrics = checkpoint["epoch_metrics"]
+        logger.info(
+            f"Resuming from epoch {start_epoch + 1}/{num_epochs} — "
+            f"best_val_loss={best_val_loss:.4f}, patience_counter={patience_counter}"
+        )
+    else:
+        logger.info("No resume checkpoint found — starting from epoch 1")
 
     print(f"\nTraining on {len(train_dataset)} images...")
     print(
@@ -1123,7 +1205,7 @@ def train_ocr_model(
     )
     print("Press Ctrl+C to stop (best model is saved automatically)\n")
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         # ── Train ─────────────────────────────────────────────
         model.train()
         train_losses = []
@@ -1237,6 +1319,25 @@ def train_ocr_model(
             }
         )
 
+        # ── Resume checkpoint (every epoch, atomic) ─────────────
+        # Separate from the best-weights save below — this exists purely
+        # so an interrupted session (Kaggle kernel dying, Wi-Fi dropping
+        # mid-run) costs at most one epoch's worth of progress, not the
+        # whole run. Saved every epoch regardless of whether it improved,
+        # since "where training actually stopped" and "the best model so
+        # far" are genuinely different things and both need to be
+        # recoverable.
+        _save_resume_checkpoint(
+            checkpoint_path=checkpoint_path,
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            best_val_loss=best_val_loss,
+            patience_counter=patience_counter,
+            epoch_metrics=epoch_metrics,
+        )
+
         # ── Checkpoint ────────────────────────────────────────
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -1253,6 +1354,14 @@ def train_ocr_model(
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
     print(f"Model saved: {save_path}")
+
+    # Training finished normally (full epochs or early-stopped) — the
+    # resume checkpoint's job is done. Remove it so a LATER, unrelated
+    # training run using the same save_path doesn't silently resume from
+    # this finished run's final state instead of starting fresh.
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        logger.info(f"Removed resume checkpoint (training finished): {checkpoint_path}")
 
     return {
         "epoch_metrics": epoch_metrics,
