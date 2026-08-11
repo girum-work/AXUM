@@ -1,0 +1,67 @@
+# Install with: pip install -r requirements.txt
+#
+# NOTE (Systems Integration Engineer, this pass): this file previously had a
+# full `pip freeze` dump concatenated above this curated list, with 5
+# version conflicts against packages below (numpy, torch, torchvision,
+# opencv-python) that pip silently resolved by last-line-wins. Removed the
+# freeze dump entirely -- a hand-maintained requirements.txt should pin
+# direct dependencies only; transitive pins belong in a lockfile, not here.
+# If a specific transitive version is load-bearing, name it and say why.
+
+# Core vision
+opencv-python-headless==4.13.0.92   # headless: no cv2.imshow/GUI calls anywhere in the codebase (verified)
+numpy==1.26.4
+Pillow==10.4.0
+
+# Machine learning
+# TODO(CPU/GPU tier decision): pinned here as plain CPU-default wheels.
+# If/when COMPUTE_TIER lands (currently held pending ML Research + Robotics
+# Software interface), GPU-tier installs may need an explicit
+# --index-url https://download.pytorch.org/whl/cu121 (or similar) --
+# that is NOT captured by a version pin alone. Flag to whoever builds the
+# tier switch rather than assuming this file alone handles it.
+torch==2.5.1
+torchvision==0.20.1
+ultralytics           # YOLO (see config.py YOLO_MODEL_PATH re: v8n vs 11n status)
+scikit-learn==1.5.2
+albumentations==1.4.15
+
+# OCR / data
+tqdm==4.66.5
+datasets              # HuggingFace datasets
+huggingface_hub
+
+# Serial communication
+pyserial==3.5
+
+# Visualization / dashboard
+matplotlib==3.9.2
+
+# Web / API (camera HTTP capture)
+requests==2.32.3
+flask==3.0.3
+flask-socketio==5.3.6
+
+# PDF catalogue
+reportlab==4.2.2
+qrcode==7.4.2
+
+# Database
+# Deliberately not using SQLAlchemy -- project uses JSON-per-object
+# persistence (see src/database/__init__.py). Removed per approved decision;
+# only re-add if the project needs multi-user access or relational queries,
+# most likely a post-competition concern.
+
+# Audio (heritage storyteller feature)
+pyttsx3==2.90
+librosa==0.10.2
+sounddevice==0.5.0
+
+# Utilities
+python-dotenv==1.0.1
+loguru==0.7.2
+imutils==0.5.4
+
+# Optional: pandas for dataset conversion
+pandas
+pyarrow               # needed to read HuggingFace parquet files
