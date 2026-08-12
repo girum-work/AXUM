@@ -21,10 +21,16 @@ def create_weighted_sampler(dataset) -> WeightedRandomSampler:
     """
     Creates a sampler that oversamples rare characters and undersamples common ones.
 
-    WHAT: Assigns each training sample a weight inversely proportional to its
-    primary character frequency so rare Ge'ez glyphs appear more often per epoch.
-    WHY: Class imbalance is the single highest-impact fix for Ethiopic OCR —
-    common syllables like ሰ dominate loss without rebalancing.
+    WHAT: Assigns each training sample a weight based on the RAREST character
+    it contains anywhere in its label, not just its first character.
+    WHY: On multi-character phrase labels (the merged dataset), a rare
+    character buried mid-phrase previously got zero oversampling benefit
+    unless it happened to also be the label's first character — this
+    silently defeated the whole point of the weighted sampler on most of
+    our actual training data. Confirmed via a real Kaggle GPU run: CharAcc
+    plateaued at 12-17% across 39 epochs while train loss kept falling,
+    the textbook overfitting signature you'd expect if rare-character
+    classes were never actually being rebalanced during training.
 
     Args:
         dataset: HHDEthiopicDataset (or any Dataset yielding
@@ -46,8 +52,16 @@ def create_weighted_sampler(dataset) -> WeightedRandomSampler:
 
     sample_weights = []
     for _, label_tensor, _ in dataset:
-        first_char = label_tensor[0].item() if len(label_tensor) > 0 else 0
-        weight = class_weights.get(first_char, 1.0)
+        label_indices = label_tensor.tolist()
+        if label_indices:
+            # Weight by the RAREST character in the whole label, not just
+            # the first one — this is the actual fix. A sample containing
+            # even one rare character now gets oversampled correctly,
+            # regardless of where that character sits in the sequence.
+            weights_in_label = [class_weights.get(idx, 1.0) for idx in label_indices]
+            weight = max(weights_in_label)
+        else:
+            weight = 1.0
         sample_weights.append(weight)
 
     sampler = WeightedRandomSampler(
