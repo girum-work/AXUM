@@ -57,6 +57,13 @@ MISSING_MARKER = "[MISSING]"
 # Unknown-length gap: a break where even the extent is lost. Aeneas keeps these
 # separate because predicting into an unmeasured gap is a harder task.
 UNKNOWN_GAP_MARKER = "[GAP]"
+# Target for a reserved gap slot the model should leave empty. Predicting this
+# is how the model states where the lost run ended, i.e. it learns the length.
+NOFILL_MARKER = "[NOFILL]"
+
+# An unknown-length gap expands to this many slots so the sequence keeps a fixed
+# shape. Spans longer than this stay known-length rather than being truncated.
+GAP_SLOT_WIDTH = 8
 
 # Main Ethiopic syllabary: consonant = (cp - 0x1200) // 8, vowel = remainder.
 SYLLABARY_START = 0x1200
@@ -284,6 +291,135 @@ def np_geometric(p: float) -> int:
         return 1
     from math import log
     return max(1, int(log(1.0 - u) / log(1.0 - p)) + 1)
+
+
+def _aligned_span_loss(
+    clusters: list[str],
+    rate: float,
+    gap_slots: int,
+    geometric_p: float = 0.1,
+    unknown_gap_prob: float = 0.25,
+) -> tuple[list[str], list[str | None]]:
+    """
+    Span loss that also emits a target for every damaged position.
+
+    An unknown-length span expands to `gap_slots` slots so the damaged and
+    target sequences stay the same length. The true graphemes fill the leading
+    slots and the remainder target NOFILL, so the model states the run's extent
+    by choosing where to stop rather than being told it.
+
+    Args:
+        clusters: Clean grapheme clusters
+        rate: Target fraction of graphemes to remove
+        gap_slots: Slots reserved per unknown-length gap
+        geometric_p: Smaller values produce longer spans
+        unknown_gap_prob: Chance a span is unknown-length
+
+    Returns:
+        (damaged tokens, targets) of equal length; None means do not score
+    """
+    total = sum(1 for g in clusters if g != " ")
+    target_count = int(round(total * rate))
+
+    lost: dict[int, bool] = {}
+    removed = 0
+    attempts = 0
+    while removed < target_count and attempts < 100:
+        attempts += 1
+        length = min(np_geometric(geometric_p), max(1, target_count - removed))
+        start = random.randrange(len(clusters))
+        span = [i for i in range(start, min(start + length, len(clusters)))
+                if clusters[i] != " " and i not in lost]
+        if not span:
+            continue
+        # Only short spans can collapse; longer ones would not fit the slots.
+        unknown = len(span) <= gap_slots and random.random() < unknown_gap_prob
+        for i in span:
+            lost[i] = unknown
+        removed += len(span)
+
+    damaged: list[str] = []
+    targets: list[str | None] = []
+    index = 0
+    while index < len(clusters):
+        if index not in lost:
+            damaged.append(clusters[index])
+            targets.append(None)
+            index += 1
+            continue
+
+        unknown = lost[index]
+        run_end = index
+        while run_end < len(clusters) and lost.get(run_end) == unknown:
+            run_end += 1
+        run = clusters[index:run_end]
+
+        if unknown:
+            for slot in range(gap_slots):
+                damaged.append(UNKNOWN_GAP_MARKER)
+                targets.append(run[slot] if slot < len(run) else NOFILL_MARKER)
+        else:
+            for grapheme in run:
+                damaged.append(MISSING_MARKER)
+                targets.append(grapheme)
+        index = run_end
+
+    return damaged, targets
+
+
+def build_training_pair(
+    text: str,
+    damage_rate: float | None = None,
+    mode: DamageMode | None = None,
+    seed: int | None = None,
+    gap_slots: int = GAP_SLOT_WIDTH,
+) -> tuple[list[str], list[str | None]]:
+    """
+    Damage `text` and return damaged tokens with a target for each position.
+
+    Inferring targets by zipping damaged against clean text fails twice: an
+    unknown-length gap changes the sequence length, and substitution modes
+    (vowel drop, OCR confusion) leave a plausible-looking character where the
+    zip sees no gap marker, so those positions are never scored. Emitting
+    targets alongside the damage removes both problems.
+
+    Args:
+        text: Clean inscription string
+        damage_rate: Fraction affected; None samples uniformly in [0, 0.75]
+        mode: Force a mode; None picks weighted random
+        seed: Optional RNG seed
+        gap_slots: Slots reserved per unknown-length gap
+
+    Returns:
+        (damaged tokens, targets) of equal length; None means do not score
+    """
+    if seed is not None:
+        random.seed(seed)
+    if damage_rate is None:
+        damage_rate = random.uniform(0.0, 0.75)
+    if mode is None:
+        mode = random.choices(list(DamageMode), weights=[35, 15, 15, 10, 25], k=1)[0]
+
+    clusters = split_graphemes(text)
+    if not clusters:
+        return [], []
+
+    if mode == DamageMode.SPAN_LOSS:
+        return _aligned_span_loss(clusters, damage_rate, gap_slots)
+
+    if mode == DamageMode.ERASURE:
+        damaged = _apply_erasure(clusters, damage_rate, edge_bias=False)
+    elif mode == DamageMode.EDGE_EROSION:
+        damaged = _apply_erasure(clusters, damage_rate, edge_bias=True)
+    elif mode == DamageMode.OCR_CONFUSION:
+        damaged = _apply_ocr_confusion(clusters, damage_rate)
+    else:
+        damaged = _apply_vowel_drop(clusters, damage_rate)
+
+    # Score wherever damage altered the text, not only where it erased.
+    targets = [clean if dmg != clean else None
+               for clean, dmg in zip(clusters, damaged)]
+    return damaged, targets
 
 
 def apply_damage(
