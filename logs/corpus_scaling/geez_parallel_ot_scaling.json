@@ -1,0 +1,95 @@
+{
+  "language": "geez",
+  "domain": "parallel_ot",
+  "corpus": "data\\restoration_corpus_geez_bible.json",
+  "generated_utc": "2026-08-24T01:38:08+00:00",
+  "ngram_order": 5,
+  "damage_rate": 0.25,
+  "seed": 42,
+  "points": [
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 250,
+      "train_chars": 14664,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3145,
+      "top3_accuracy": 0.4245,
+      "perplexity": 78.16,
+      "unique_fidels": 188
+    },
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 500,
+      "train_chars": 30018,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3272,
+      "top3_accuracy": 0.4477,
+      "perplexity": 74.85,
+      "unique_fidels": 211
+    },
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 1000,
+      "train_chars": 58190,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3323,
+      "top3_accuracy": 0.456,
+      "perplexity": 71.09,
+      "unique_fidels": 228
+    },
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 2500,
+      "train_chars": 143938,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3407,
+      "top3_accuracy": 0.4754,
+      "perplexity": 65.38,
+      "unique_fidels": 265
+    },
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 5000,
+      "train_chars": 286897,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3509,
+      "top3_accuracy": 0.4906,
+      "perplexity": 58.38,
+      "unique_fidels": 284
+    },
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 10000,
+      "train_chars": 577887,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3471,
+      "top3_accuracy": 0.5084,
+      "perplexity": 53.54,
+      "unique_fidels": 318
+    },
+    {
+      "language": "geez",
+      "domain": "parallel_ot",
+      "train_phrases": 13660,
+      "train_chars": 789233,
+      "eval_phrases": 390,
+      "slots": 3936,
+      "top1_accuracy": 0.3501,
+      "top3_accuracy": 0.513,
+      "perplexity": 51.55,
+      "unique_fidels": 343
+    }
+  ]
+}

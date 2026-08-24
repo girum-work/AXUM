@@ -1,0 +1,95 @@
+{
+  "language": "amharic",
+  "domain": "religious",
+  "corpus": "data\\restoration_corpus_amharic_bible.json",
+  "generated_utc": "2026-08-24T01:29:06+00:00",
+  "ngram_order": 5,
+  "damage_rate": 0.25,
+  "seed": 42,
+  "points": [
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 250,
+      "train_chars": 7521,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.1615,
+      "top3_accuracy": 0.2663,
+      "perplexity": 157.78,
+      "unique_fidels": 271
+    },
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 500,
+      "train_chars": 15112,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.1847,
+      "top3_accuracy": 0.2882,
+      "perplexity": 165.78,
+      "unique_fidels": 317
+    },
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 1000,
+      "train_chars": 30959,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.2021,
+      "top3_accuracy": 0.3081,
+      "perplexity": 172.56,
+      "unique_fidels": 377
+    },
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 2500,
+      "train_chars": 77051,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.2224,
+      "top3_accuracy": 0.3441,
+      "perplexity": 167.76,
+      "unique_fidels": 433
+    },
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 5000,
+      "train_chars": 155635,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.2406,
+      "top3_accuracy": 0.3623,
+      "perplexity": 169.43,
+      "unique_fidels": 501
+    },
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 10000,
+      "train_chars": 311947,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.2464,
+      "top3_accuracy": 0.3743,
+      "perplexity": 155.95,
+      "unique_fidels": 533
+    },
+    {
+      "language": "amharic",
+      "domain": "religious",
+      "train_phrases": 13963,
+      "train_chars": 436531,
+      "eval_phrases": 387,
+      "slots": 2415,
+      "top1_accuracy": 0.2501,
+      "top3_accuracy": 0.3776,
+      "perplexity": 152.11,
+      "unique_fidels": 558
+    }
+  ]
+}

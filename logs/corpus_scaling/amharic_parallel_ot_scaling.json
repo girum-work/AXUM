@@ -1,0 +1,107 @@
+{
+  "language": "amharic",
+  "domain": "parallel_ot",
+  "corpus": "data\\restoration_corpus_amharic_parallel.json",
+  "generated_utc": "2026-08-24T01:37:07+00:00",
+  "ngram_order": 5,
+  "damage_rate": 0.25,
+  "seed": 42,
+  "points": [
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 250,
+      "train_chars": 6620,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.1679,
+      "top3_accuracy": 0.2582,
+      "perplexity": 166.68,
+      "unique_fidels": 288
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 500,
+      "train_chars": 13143,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.1909,
+      "top3_accuracy": 0.2894,
+      "perplexity": 178.37,
+      "unique_fidels": 348
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 1000,
+      "train_chars": 26540,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.204,
+      "top3_accuracy": 0.3042,
+      "perplexity": 182.81,
+      "unique_fidels": 408
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 2500,
+      "train_chars": 67079,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.2232,
+      "top3_accuracy": 0.3353,
+      "perplexity": 182.86,
+      "unique_fidels": 493
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 5000,
+      "train_chars": 134315,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.2369,
+      "top3_accuracy": 0.3534,
+      "perplexity": 175.28,
+      "unique_fidels": 538
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 10000,
+      "train_chars": 269738,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.2549,
+      "top3_accuracy": 0.3736,
+      "perplexity": 169.11,
+      "unique_fidels": 602
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 25000,
+      "train_chars": 670431,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.262,
+      "top3_accuracy": 0.3928,
+      "perplexity": 152.19,
+      "unique_fidels": 657
+    },
+    {
+      "language": "amharic",
+      "domain": "parallel_ot",
+      "train_phrases": 25171,
+      "train_chars": 675032,
+      "eval_phrases": 357,
+      "slots": 1828,
+      "top1_accuracy": 0.262,
+      "top3_accuracy": 0.3928,
+      "perplexity": 151.78,
+      "unique_fidels": 657
+    }
+  ]
+}
