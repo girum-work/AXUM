@@ -180,6 +180,11 @@ def main() -> int:
                         help="bfloat16 autocast; roughly halves step time on Ada")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=0, help="0 = all phrases")
+    parser.add_argument("--limit-chars", type=int, default=0,
+                        help="Cap training text by character count. Chunk lengths "
+                             "differ between corpora (Ge'ez AGE averages 64.9, "
+                             "Amharic 32.5), so equal phrase counts are not equal "
+                             "amounts of text; use this to compare languages.")
     parser.add_argument("--out", type=Path,
                         default=Path("models/restoration"))
     args = parser.parse_args()
@@ -188,18 +193,29 @@ def main() -> int:
     torch.manual_seed(args.seed)
 
     phrases = load_phrases(args.corpus, args.max_len)
+    # Shuffle first: corpus order is canonical book order, so slicing the head
+    # would sample Genesis rather than the whole work.
+    random.shuffle(phrases)
     if args.limit:
         phrases = phrases[:args.limit]
+    if args.limit_chars:
+        kept, used = [], 0
+        for phrase in phrases:
+            if used >= args.limit_chars:
+                break
+            kept.append(phrase)
+            used += len(phrase)
+        phrases = kept
     if len(phrases) < 50:
         print(f"Only {len(phrases)} usable phrases; need more", file=sys.stderr)
         return 1
-    random.shuffle(phrases)
 
     split = max(1, int(len(phrases) * args.val_fraction))
     val_phrases, train_phrases = phrases[:split], phrases[split:]
     vocab = FidelVocab.from_corpus(train_phrases)
 
     print(f"{args.language}: {len(train_phrases):,} train | {len(val_phrases):,} val "
+          f"| {sum(len(p) for p in train_phrases):,} train chars "
           f"| vocab {len(vocab)} | eval damage {args.eval_damage_rate:.0%}")
 
     train_set = RestorationDataset(train_phrases, vocab, args.max_len)
