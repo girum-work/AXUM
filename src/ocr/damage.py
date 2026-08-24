@@ -22,8 +22,11 @@ GEEZ_CHAR_RE = re.compile(
     r"[\u1200-\u137F\u1360-\u1368\u1369-\u137C]"
 )
 
-# Combining marks often lost on weathered stone
-COMBINING_MARK_RE = re.compile(r"[\u135D-\u137C]")
+# Combining marks often lost on weathered stone.
+# Only U+135D-U+135F are category Mn. U+1360-U+1368 are punctuation (Po) and
+# U+1369-U+137C are numerals (No); including them glued marks onto the preceding
+# syllable, so "\u120D\u1362" tokenised as one unit instead of two.
+COMBINING_MARK_RE = re.compile(r"[\u135D-\u135F]")
 
 # Visually similar fidels for OCR-style substitution (before erasure)
 OCR_CONFUSIONS: dict[str, list[str]] = {
