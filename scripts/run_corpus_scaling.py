@@ -440,6 +440,9 @@ def main() -> int:
                         help="Genre label, e.g. religious or encyclopedic. "
                              "Only same-domain runs are size-comparable.")
     parser.add_argument("--order", type=int, default=5)
+    parser.add_argument("--sizes", nargs="*", type=int, default=list(DEFAULT_SIZES),
+                        help="Training-set sizes in phrases; raise the ceiling "
+                             "for corpora larger than the default 100k")
     parser.add_argument("--damage-rate", type=float, default=0.25)
     parser.add_argument("--eval-phrases", type=int, default=400)
     parser.add_argument("--seed", type=int, default=42)
@@ -456,7 +459,7 @@ def main() -> int:
         return 1
 
     points = run_language(
-        args.corpus, args.language, args.domain, DEFAULT_SIZES,
+        args.corpus, args.language, args.domain, tuple(sorted(args.sizes)),
         args.order, args.damage_rate, args.eval_phrases, args.seed,
     )
 
