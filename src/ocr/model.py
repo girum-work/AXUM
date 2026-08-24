@@ -44,6 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config import NUM_GEEZ_CLASSES, OCR_BEAM_WIDTH, OCR_IMG_SIZE, OCR_USE_BEAM_DECODE
+from src.ocr.training_contract import build_assigned_ethiopic_charset, charset_fingerprint
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -66,31 +67,7 @@ def build_geez_charset() -> tuple:
         char_to_idx: Dict mapping character → integer index
         idx_to_char: Dict mapping integer index → character
     """
-    charset = []
-
-    # Main Ethiopic syllables: U+1200 to U+137C
-    for cp in range(0x1200, 0x137D):
-        try:
-            char = chr(cp)
-            charset.append(char)
-        except (ValueError, OverflowError):
-            continue
-
-    # Ethiopic numerals: U+1369 to U+137C (already included above)
-    # Ethiopic punctuation: U+1361 to U+1368
-    for cp in range(0x1361, 0x1369):
-        char = chr(cp)
-        if char not in charset:
-            charset.append(char)
-
-    # Add blank token for CTC (must be at index 0)
-    # CTC (Connectionist Temporal Classification) requires a special
-    # "blank" token that represents "no character here" — this is how
-    # the model handles variable-length outputs and character boundaries
-    charset = ['<BLANK>'] + charset
-
-    # Add unknown token for characters not in the training set
-    charset.append('<UNK>')
+    charset = list(build_assigned_ethiopic_charset())
 
     char_to_idx = {char: idx for idx, char in enumerate(charset)}
     idx_to_char = {idx: char for idx, char in enumerate(charset)}
@@ -212,6 +189,20 @@ class GeezCNNFeatureExtractor(nn.Module):
         x = x.permute(2, 0, 1)
 
         return x
+
+
+class GeezGlyphClassifier(nn.Module):
+    """Isolated-glyph pretraining head over the shared OCR visual encoder."""
+
+    def __init__(self, num_classes: int):
+        super().__init__()
+        self.cnn = GeezCNNFeatureExtractor()
+        self.classifier = nn.Linear(512, num_classes)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        sequence = self.cnn(images)
+        pooled = sequence.mean(dim=0)
+        return self.classifier(pooled)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -588,6 +579,9 @@ def save_ocr_model(model: GeezOCRModel, path: Path):
         'model_state_dict': cpu_state,
         'num_classes':      model.num_classes,
         'charset_size':     len(GEEZ_CHARSET),
+        'charset':          list(GEEZ_CHARSET),
+        'charset_fingerprint': charset_fingerprint(GEEZ_CHARSET),
+        'image_size':       list(OCR_IMG_SIZE),
     }, path)
     logger.info(f"OCR model saved: {path}")
 
@@ -600,6 +594,23 @@ def load_ocr_model(path: Path) -> GeezOCRModel:
 
     checkpoint  = torch.load(path, map_location='cpu')
     num_classes = checkpoint.get('num_classes', len(GEEZ_CHARSET))
+    saved_charset = checkpoint.get('charset')
+    if saved_charset is not None and list(saved_charset) != list(GEEZ_CHARSET):
+        raise ValueError(
+            "OCR checkpoint charset does not match the active charset "
+            f"({checkpoint.get('charset_fingerprint', 'unknown')} != "
+            f"{charset_fingerprint(GEEZ_CHARSET)})"
+        )
+    if saved_charset is None and num_classes != len(GEEZ_CHARSET):
+        raise ValueError(
+            f"Legacy OCR checkpoint has {num_classes} classes but the active "
+            f"charset has {len(GEEZ_CHARSET)}; retraining is required"
+        )
+    saved_image_size = checkpoint.get('image_size')
+    if saved_image_size is not None and list(saved_image_size) != list(OCR_IMG_SIZE):
+        raise ValueError(
+            f"OCR checkpoint image size {saved_image_size} does not match {OCR_IMG_SIZE}"
+        )
 
     model = GeezOCRModel(num_classes=num_classes)
     model.load_state_dict(checkpoint['model_state_dict'])

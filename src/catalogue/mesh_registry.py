@@ -17,13 +17,31 @@ from loguru import logger
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from config import CATALOGUE_DIR, MESH_DIR, ROOT_DIR
+from config import CATALOGUE_DIR, MESH_DIR, MESH_MODEL_EXTENSIONS, ROOT_DIR
 from src.photogrammetry.meshroom import (
     MeshPublishResult,
     mesh_public_url,
     resolve_mesh_path,
     validate_mesh,
 )
+
+
+def find_mesh_files(folder: Path) -> list[Path]:
+    """
+    List renderable model files in a published mesh folder.
+
+    Args:
+        folder: Directory under ``scans/meshes/``
+
+    Returns:
+        Matching files in ``MESH_MODEL_EXTENSIONS`` preference order
+    """
+    if not folder.exists():
+        return []
+    found: list[Path] = []
+    for ext in MESH_MODEL_EXTENSIONS:
+        found.extend(sorted(p for p in folder.glob(f"*{ext}") if p.is_file()))
+    return found
 
 
 def get_mesh_status(object_id: str, mesh_path: str = "") -> dict[str, Any]:
@@ -109,6 +127,35 @@ def apply_publish_result(
     return updated
 
 
+def preview_mesh_entry(object_id: str) -> dict[str, Any] | None:
+    """
+    Build a minimal, catalogue-independent viewer entry for any published
+    mesh folder — for verifying a raw Meshroom export (e.g. a test scan)
+    without registering it as a heritage catalogue record.
+
+    Args:
+        object_id: Mesh folder name under ``scans/meshes/``
+
+    Returns:
+        Dict shaped for the dashboard's Three.js viewer, or None if no
+        OBJ is published under that folder
+    """
+    mesh_dir = MESH_DIR / object_id
+    obj_files = find_mesh_files(mesh_dir)
+    if not obj_files:
+        return None
+
+    rel = obj_files[0].relative_to(ROOT_DIR).as_posix()
+    status = get_mesh_status(object_id, rel)
+    return {
+        "object_id": object_id,
+        "class_name": "other",
+        "class_confidence": 0.0,
+        "is_preview": True,
+        **status,
+    }
+
+
 def scan_published_meshes() -> list[dict[str, Any]]:
     """
     List all published mesh folders under ``scans/meshes/``.
@@ -123,7 +170,7 @@ def scan_published_meshes() -> list[dict[str, Any]]:
     for folder in sorted(MESH_DIR.iterdir()):
         if not folder.is_dir():
             continue
-        obj_files = list(folder.glob("*.obj"))
+        obj_files = find_mesh_files(folder)
         if not obj_files:
             continue
         rel = obj_files[0].relative_to(ROOT_DIR).as_posix()
@@ -151,7 +198,7 @@ def sync_catalogue_mesh_paths() -> int:
 
         object_id = data["object_id"]
         mesh_dir = MESH_DIR / object_id
-        obj_files = list(mesh_dir.glob("*.obj")) if mesh_dir.exists() else []
+        obj_files = find_mesh_files(mesh_dir)
         if not obj_files:
             continue
 

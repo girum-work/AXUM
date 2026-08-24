@@ -23,7 +23,9 @@ in pipeline.py — no code changes needed.
 Run: python scripts/merge_datasets.py
 """
 
+import argparse
 import csv
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -40,12 +42,10 @@ OUTPUT_DIR  = Path("data/geez_merged/train_raw")
 IMG_OUT_DIR = OUTPUT_DIR / "image_train"
 CSV_OUT     = OUTPUT_DIR / "image_text_pairs_train.csv"
 
-# Yaredoffice folder index -> Ge'ez character
-# Folder 0 = U+1200 (ሀ), folder 1 = U+1201 (ሁ), etc.
-YARED_INDEX_TO_CHAR = {i: chr(0x1200 + i) for i in range(287)}
-
-
-def merge_datasets():
+def merge_datasets(
+    include_yared: bool = False,
+    yared_map_path: Path | None = None,
+):
     """
     Main merge function. Copies all images into a single folder
     and writes a unified CSV mapping filename -> Ge'ez label.
@@ -54,9 +54,23 @@ def merge_datasets():
     logger.info("AXUM — Dataset Merger")
     logger.info("="*60)
 
-    from src.ocr.pipeline import label_fits_ctc
+    from src.ocr.model import GEEZ_CHARSET
+    from src.ocr.training_contract import (
+        audit_labels,
+        label_fits_ctc,
+        load_class_map,
+        normalize_ocr_label,
+    )
+
+    yared_map = None
+    if include_yared:
+        if yared_map_path is None:
+            raise ValueError("--include-yared requires --yared-map with an authoritative class mapping")
+        yared_map = load_class_map(yared_map_path)
 
     # ── Setup output dirs ──────────────────────────────────────
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR)
     IMG_OUT_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"Output: {OUTPUT_DIR}")
 
@@ -90,7 +104,7 @@ def merge_datasets():
             continue
 
         fname = row[0].strip()
-        label = row[1].strip()
+        label = normalize_ocr_label(row[1])
 
         if not label or not fname:
             hhd_skipped += 1
@@ -111,7 +125,7 @@ def merge_datasets():
         dst = IMG_OUT_DIR / new_fname
 
         shutil.copy2(src, dst)
-        rows.append((new_fname, label))
+        rows.append((new_fname, label, "hhd"))
         hhd_count += 1
 
     logger.info(f"  Copied: {hhd_count} | Skipped: {hhd_skipped}")
@@ -121,7 +135,9 @@ def merge_datasets():
     # ══════════════════════════════════════════════════════════
     logger.info("\nSource 2: Yaredoffice (character-level)")
 
-    if not YARED_DIR.exists():
+    if not include_yared:
+        logger.info("Yaredoffice excluded — use isolated-glyph pretraining unless a verified class map is supplied")
+    elif not YARED_DIR.exists():
         logger.warning(f"Yaredoffice dir not found: {YARED_DIR}")
         logger.warning("Skipping — merge will use HHD only")
     else:
@@ -144,11 +160,11 @@ def merge_datasets():
                 continue
 
             folder_idx = int(char_dir.name)
-            if folder_idx not in YARED_INDEX_TO_CHAR:
+            if yared_map is None or folder_idx not in yared_map:
                 yared_unknown += 1
                 continue
 
-            char = YARED_INDEX_TO_CHAR[folder_idx]
+            char = yared_map[folder_idx]
 
             # Copy all images in this character folder
             images = (list(char_dir.glob("*.png")) +
@@ -161,7 +177,7 @@ def merge_datasets():
 
                 try:
                     shutil.copy2(img_path, dst)
-                    rows.append((new_fname, char))
+                    rows.append((new_fname, char, "yared"))
                     yared_count += 1
                 except Exception as e:
                     logger.debug(f"Copy failed {img_path}: {e}")
@@ -191,8 +207,24 @@ def merge_datasets():
         if p.suffix.lower() in (".png", ".jpg", ".jpeg")
     )
 
-    hhd_samples   = sum(1 for r in rows if r[0].startswith("hhd_"))
-    yared_samples = sum(1 for r in rows if r[0].startswith("yrd_"))
+    hhd_samples   = sum(1 for r in rows if r[2] == "hhd")
+    yared_samples = sum(1 for r in rows if r[2] == "yared")
+    audit = audit_labels((row[1] for row in rows), GEEZ_CHARSET)
+    audit_path = OUTPUT_DIR / "dataset_audit.json"
+    audit_path.write_text(json.dumps({
+        "total_samples": len(rows),
+        "sources": {"hhd": hhd_samples, "yared": yared_samples},
+        "label_audit": {
+            "valid": audit.valid,
+            "empty": audit.empty,
+            "ctc_infeasible": audit.ctc_infeasible,
+            "unassigned_characters": audit.unassigned_characters,
+            "unknown_characters": audit.unknown_characters,
+        },
+        "yared_map": str(yared_map_path) if yared_map_path else None,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not audit.valid:
+        raise ValueError(f"Merged dataset failed label audit; see {audit_path}")
 
     print("\n" + "="*60)
     print("MERGE COMPLETE")
@@ -236,9 +268,12 @@ def verify_merged_dataset():
 
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(description="Build an audited AXUM OCR training manifest")
+    parser.add_argument("--include-yared", action="store_true")
+    parser.add_argument("--yared-map", type=Path)
+    args = parser.parse_args()
 
-    success = merge_datasets()
+    success = merge_datasets(args.include_yared, args.yared_map)
 
     if success:
         print("\nRunning verification...")

@@ -28,14 +28,15 @@ from reportlab.pdfgen        import canvas
 from reportlab.lib.utils     import ImageReader
 
 
-# ── Brand colors ──────────────────────────────────────────────
-COLOR_GOLD    = HexColor('#C9A84C')   # Aksumite gold
-COLOR_DARK    = HexColor('#1A1A2E')   # deep navy
-COLOR_MID     = HexColor('#2D2D44')   # mid navy
-COLOR_ACCENT  = HexColor('#E94560')   # alert red
-COLOR_SUCCESS = HexColor('#4CAF50')   # success green
-COLOR_TEXT    = HexColor('#E0E0E0')   # light text on dark bg
-COLOR_SUBTEXT = HexColor('#A0A0B0')   # secondary text
+# ── Publication palette ───────────────────────────────────────
+# The catalogue is a printable conservation report, not a dashboard view.
+COLOR_GOLD    = black
+COLOR_DARK    = white
+COLOR_MID     = HexColor('#F2F2F2')
+COLOR_ACCENT  = black
+COLOR_SUCCESS = black
+COLOR_TEXT    = black
+COLOR_SUBTEXT = HexColor('#555555')
 
 
 class CatalogueGenerator:
@@ -144,9 +145,9 @@ class CatalogueGenerator:
         c.setFillColor(COLOR_MID)
         c.rect(0, H - header_h, W, header_h, fill=1, stroke=0)
 
-        # Gold accent line below header
+        # Publication rule below the running header
         c.setFillColor(COLOR_GOLD)
-        c.rect(0, H - header_h - 1*mm, W, 1*mm, fill=1, stroke=0)
+        c.rect(12*mm, H - header_h - 1*mm, W - 24*mm, 0.5*mm, fill=1, stroke=0)
 
         # Header text
         c.setFillColor(COLOR_GOLD)
@@ -157,7 +158,7 @@ class CatalogueGenerator:
         c.setFont("Helvetica", 9)
         c.drawString(60*mm, H - 14*mm, "Artefact Digitization & Heritage Preservation System")
 
-        # Object number badge (top right)
+        # Object number (top right)
         obj_num = entry.get('sequence_number', 0)
         c.setFillColor(COLOR_GOLD)
         c.setFont("Helvetica-Bold", 11)
@@ -290,7 +291,7 @@ class CatalogueGenerator:
 
         # Section background
         c.setFillColor(COLOR_MID)
-        c.roundRect(x, y - section_h, w, section_h, 2*mm, fill=1, stroke=0)
+        c.rect(x, y - section_h, w, section_h, fill=1, stroke=0)
 
         # Gold left accent bar
         c.setFillColor(COLOR_GOLD)
@@ -339,7 +340,7 @@ class CatalogueGenerator:
         section_h = 28*mm
 
         c.setFillColor(COLOR_MID)
-        c.roundRect(x, y - section_h, w, section_h, 2*mm, fill=1, stroke=0)
+        c.rect(x, y - section_h, w, section_h, fill=1, stroke=0)
 
         c.setFillColor(COLOR_GOLD)
         c.rect(x, y - section_h, 2*mm, section_h, fill=1, stroke=0)
@@ -370,7 +371,7 @@ class CatalogueGenerator:
         section_h = 28*mm
 
         c.setFillColor(COLOR_MID)
-        c.roundRect(x, y - section_h, w, section_h, 2*mm, fill=1, stroke=0)
+        c.rect(x, y - section_h, w, section_h, fill=1, stroke=0)
 
         c.setFillColor(COLOR_GOLD)
         c.rect(x, y - section_h, 2*mm, section_h, fill=1, stroke=0)
@@ -409,8 +410,7 @@ class CatalogueGenerator:
         badge_y = 20*mm
 
         c.setFillColor(COLOR_ACCENT)
-        c.roundRect(badge_x, badge_y, badge_w, badge_h,
-                    3*mm, fill=1, stroke=0)
+        c.rect(badge_x, badge_y, badge_w, badge_h, fill=1, stroke=0)
         c.setFillColor(white)
         c.setFont("Helvetica-Bold", 10)
         c.drawCentredString(badge_x + badge_w/2,
@@ -419,14 +419,14 @@ class CatalogueGenerator:
 
     def _draw_summary_page(self, c, mission: dict, W, H):
         """Draw mission summary page (last page of catalogue)."""
-        # Background
+        # White paper background
         c.setFillColor(COLOR_DARK)
         c.rect(0, 0, W, H, fill=1, stroke=0)
 
-        # Gold header
-        c.setFillColor(COLOR_GOLD)
+        # Gray report header
+        c.setFillColor(COLOR_MID)
         c.rect(0, H - 30*mm, W, 30*mm, fill=1, stroke=0)
-        c.setFillColor(COLOR_DARK)
+        c.setFillColor(COLOR_TEXT)
         c.setFont("Helvetica-Bold", 18)
         c.drawCentredString(W/2, H - 18*mm, "MISSION SUMMARY")
 

@@ -56,17 +56,22 @@ ROVER_SPEED_CMS = 10.0
 # ─── OCR ──────────────────────────────────────────────────────
 OCR_MODEL_PATH      = MODELS_DIR / "geez_ocr.pth"
 OCR_CONFIDENCE_MIN  = 0.50    # below this = flag for expert review
-OCR_IMG_SIZE      = (32, 128)   # height, width in pixels — active OCR input shape
-NUM_GEEZ_CLASSES  = 300         # active charset size after build_geez_charset()
+OCR_IMG_SIZE      = (32, 256)   # height, width; aspect ratio is preserved with padding
+NUM_GEEZ_CLASSES  = 360         # assigned core Ethiopic + CTC blank/unknown
+OCR_CTC_SEQ_LEN   = 58          # CNN output timesteps for 32x256 input
 OCR_BEAM_WIDTH    = 5           # CTC beam search width at inference
 OCR_USE_BEAM_DECODE = True      # beam search vs greedy (no retrain needed)
-OCR_USE_WEIGHTED_SAMPLER = True # oversample rare Ge'ez characters in training
+OCR_USE_WEIGHTED_SAMPLER = False # enable only as a measured ablation
 OCR_USE_STONE_AUGMENT = True    # albumentations stone-inscription train augment
 OCR_USE_ADAPTIVE_BINARIZE = True  # CLAHE + adaptive threshold in preprocess_for_ocr
 
 # ── Models ─────────────────────────────────────────────────────
 YOLO_MODEL_PATH = MODELS_DIR / "yolo11_artefacts.pt"
                  # Set to None to use COCO fallback before fine-tuning
+# Dedicated obstacle detector for arm-motion safety.  This must remain
+# independent of artefact classification weights and training.
+NAV_YOLO_WEIGHTS = "yolo11s.pt"
+NAV_YOLO_CONFIDENCE_MIN = 0.35
 
 # ─── Object Detection ─────────────────────────────────────────
 OBJ_MODEL_PATH      = MODELS_DIR / "artefact_classifier.pth"
@@ -138,9 +143,13 @@ ARM_MOVE_DELAY  = 0.02        # seconds between servo interpolation steps
 # ─── Turntable ────────────────────────────────────────────────
 TURNTABLE_STEPS      = 36     # photos per full rotation
 TURNTABLE_SETTLE_MS  = 500    # wait after each step before photo
+# Set True only after the quadrant/UV LED hardware has been bench-tested with
+# the active firmware.  Scan code must not claim advanced lighting data until
+# that physical integration is confirmed.
+FIRMWARE_LED_READY   = False
 
 # ─── Photogrammetry ───────────────────────────────────────────
-MESHROOM_PATH        = r"C:\Meshroom\Meshroom.exe"   # update after install
+MESHROOM_PATH        = r"C:\Users\Len\Downloads\Meshroom-2025.1.0-Windows\Meshroom-2025.1.0\meshroom_batch.exe"
 MESHROOM_CACHE_DIR   = SCANS_DIR / "meshroom_cache"  # per-object Meshroom output
 MESH_PUBLISH_NAME    = "model.obj"                   # canonical dashboard OBJ name
 MESH_PUBLISH_MTL     = "model.mtl"                   # paired MTL (if textured)
@@ -153,7 +162,22 @@ MESHROOM_OBJ_PRIORITY = (
 )
 MESHROOM_TIMEOUT_SEC = 7200                          # 2 h max per reconstruction
 MESH_SHOW_PLACEHOLDER = True                         # dashboard fallback when no mesh
-MESH_TEXTURE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
+MESH_TEXTURE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr")
+# Renderable model files, in preference order. OBJ first so a Meshroom
+# export keeps winning over a GLB sitting in the same folder -- the OBJ
+# carries the MTL and texture files the viewer already resolves.
+MESH_MODEL_EXTENSIONS = (".obj", ".glb")
+# Reconstruction featured on the control dashboard's preview panel. Any
+# folder under MESH_DIR works; TEST-SCEAUX is the known-good textured
+# result from the openMVG Sceaux Castle benchmark set.
+DASHBOARD_FEATURE_MESH = "TEST-SCEAUX"
+
+# ─── Rover attitude display (GY-80 IMU) ───────────────────────
+# Masked orthographic renders of the rover, one per axis view. Missing
+# files fall back to a built-in SVG silhouette, so a partial set is fine.
+#   top.png   -> yaw     front.png -> roll     side.png  -> pitch
+ROVER_VIEW_DIR        = ROOT_DIR / "src" / "dashboard" / "static" / "rover"
+ROVER_VIEW_EXTENSIONS = (".png", ".webp", ".svg", ".jpg")
 
 # ─── Ge'ez LLM restoration (fine-tuning) ───────────────────────
 GEEZ_RESTORATION_CORPUS   = DATA_DIR / "corpus" / "geez_inscriptions.jsonl"

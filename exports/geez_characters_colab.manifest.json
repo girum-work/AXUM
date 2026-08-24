@@ -1,0 +1,20 @@
+{
+  "exported_at_utc": "2026-08-22T20:38:46.102100+00:00",
+  "ocr_pipeline_fix_id": "ctc_filter_alignment_metrics_v1",
+  "ocr_fixes_present_in_repo": true,
+  "data_zip": "geez_characters_colab.zip",
+  "data_root": "data/geez_characters",
+  "code_zip": "geez_ocr_colab_code.zip",
+  "verification": {
+    "ok": true,
+    "errors": [],
+    "csv_rows": 57374,
+    "zip_images": 57374,
+    "csv_images_referenced": 57374,
+    "missing_in_zip": 0,
+    "official_test_splits": [
+      "iid",
+      "ood-18th"
+    ]
+  }
+}

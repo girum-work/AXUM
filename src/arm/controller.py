@@ -253,6 +253,91 @@ class ArduinoSerial:
         """
         return self.send_command("CAM_ARM_TRIGGER", expect_prefix="OK:")
 
+    def attitude(self) -> "RoverAttitude":
+        """
+        Query the GY-80 IMU's fused orientation.
+
+        Firmware runs a Mahony filter at 100Hz in ``loop()`` and reports
+        the running estimate here -- this call does not sample the
+        sensors, so calling it faster than the fusion rate returns
+        repeated values rather than fresher ones.
+
+        Returns:
+            RoverAttitude. ``is_valid`` is False when no IMU was found on
+            the I2C bus or the response doesn't parse; in that case the
+            angles are all 0.0 and mean "no reading", not "level". Never
+            raises -- a bad IMU response shouldn't take down a caller any
+            more than a bad STATUS response would.
+        """
+        response = self.send_command("ATTITUDE")
+        try:
+            payload = json.loads(response)
+        except json.JSONDecodeError:
+            logger.warning(f"Could not parse Arduino ATTITUDE: {response!r}")
+            return RoverAttitude(is_valid=False)
+
+        if not payload.get("ok"):
+            return RoverAttitude(is_valid=False)
+
+        try:
+            return RoverAttitude(
+                is_valid=True,
+                roll=float(payload["roll"]),
+                pitch=float(payload["pitch"]),
+                yaw=float(payload["yaw"]),
+                gyro_biased=bool(payload.get("biased", False)),
+                filter_hz=float(payload.get("hz", 0.0)),
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning(f"Could not parse Arduino ATTITUDE fields: {response!r}")
+            return RoverAttitude(is_valid=False)
+
+    def calibrate_imu(self) -> bool:
+        """
+        Re-measure the gyro's zero-rate offset.
+
+        Blocks the firmware for ~200ms and requires the rover to be
+        stationary -- firmware has no way to detect motion during the
+        average, so calibrating while driving bakes that motion into the
+        bias and yaw will creep afterwards.
+
+        Returns:
+            True when the firmware acknowledged, False when no IMU is
+            fitted or the command failed.
+        """
+        try:
+            self.send_command("IMU:CALIBRATE", expect_prefix="OK:")
+            return True
+        except Exception as exc:
+            logger.warning(f"IMU calibrate failed: {exc}")
+            return False
+
+
+@dataclass
+class RoverAttitude:
+    """
+    Parsed result of an ATTITUDE query.
+
+    Args:
+        is_valid: False when no IMU was detected or the reply was
+            unparseable. All angles are 0.0 in that case and must not be
+            rendered as a level rover.
+        roll: Degrees, -180..180.
+        pitch: Degrees, -90..90.
+        yaw: Degrees, **0..360** (firmware wraps negatives), not signed.
+        gyro_biased: Whether a zero-rate calibration has been taken. When
+            False, yaw drifts noticeably within a minute.
+        filter_hz: Observed Mahony update rate. A value well under 100
+            means the firmware loop is being starved by something else.
+    """
+
+    is_valid: bool
+    roll: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+    gyro_biased: bool = False
+    filter_hz: float = 0.0
+
 
 @dataclass
 class GPSFix:
@@ -468,10 +553,30 @@ class CameraInterface:
         timeout: HTTP timeout in seconds.
     """
 
-    def __init__(self, stream_url: str = ESP32_CAM_URL, timeout: float = 8.0) -> None:
+    def __init__(
+        self,
+        stream_url: str = ESP32_CAM_URL,
+        timeout: float = 8.0,
+        retries: int = 2,
+        require_status: bool = False,
+        session: requests.Session | None = None,
+    ) -> None:
         self.stream_url = stream_url
         self.timeout = timeout
+        self.retries = retries
+        self.require_status = require_status
+        self.session = session or requests.Session()
         self.capture_url = self._capture_url_from_stream(stream_url)
+        self.status_url = self._endpoint_from_stream(stream_url, "status")
+
+    def status(self) -> dict[str, Any]:
+        """Return camera-service health data or raise when it is not ready."""
+        response = self.session.get(self.status_url, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise RuntimeError(f"Camera service is not ready: {payload!r}")
+        return payload
 
     def capture_frame(self, output_path: Path | None = None) -> bytes:
         """
@@ -483,11 +588,24 @@ class CameraInterface:
         Returns:
             Raw JPEG bytes.
         """
-        response = requests.get(self.capture_url, timeout=self.timeout)
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "")
-        if "image" not in content_type and not response.content.startswith(b"\xff\xd8"):
-            raise RuntimeError(f"ESP32 capture did not return an image: {content_type}")
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                response = self.session.get(self.capture_url, timeout=self.timeout)
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if "image" not in content_type and not response.content.startswith(b"\xff\xd8"):
+                    raise RuntimeError(f"Camera capture did not return an image: {content_type}")
+                break
+            except (requests.RequestException, RuntimeError) as exc:
+                last_error = exc
+                if attempt >= self.retries:
+                    raise RuntimeError(
+                        f"Camera capture failed after {self.retries + 1} attempt(s): {exc}"
+                    ) from exc
+                time.sleep(0.25 * (attempt + 1))
+        else:
+            raise RuntimeError(f"Camera capture failed: {last_error}")
 
         if output_path:
             output_path = Path(output_path)
@@ -504,9 +622,12 @@ class CameraInterface:
         """Convert a configured stream URL into the still capture URL."""
         if stream_url.endswith(":81/stream"):
             return stream_url.replace(":81/stream", "/capture")
-        if stream_url.endswith("/stream"):
-            return stream_url[:-len("/stream")] + "/capture"
-        return stream_url.rstrip("/") + "/capture"
+        return CameraInterface._endpoint_from_stream(stream_url, "capture")
+
+    @staticmethod
+    def _endpoint_from_stream(stream_url: str, endpoint: str) -> str:
+        base = stream_url[:-len("/stream")] if stream_url.endswith("/stream") else stream_url.rstrip("/")
+        return f"{base}/{endpoint}"
 
 
 class TurntableController:
@@ -557,6 +678,9 @@ class TurntableController:
         """
         if photo_count <= 0:
             raise ValueError("photo_count must be positive")
+
+        if self.camera.require_status:
+            self.camera.status()
 
         output_dir = Path(output_dir or (SCAN_PHOTOS_DIR / object_id))
         output_dir.mkdir(parents=True, exist_ok=True)

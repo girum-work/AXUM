@@ -48,7 +48,10 @@
 | `LED:QUAD:<N\|E\|S\|W>` | `OK:LED:QUAD:<dir>` | One quadrant on at a time (photometric stereo). |
 | `LED:UV:ON` / `LED:UV:OFF` | `OK:LED:UV:ON` / `OK:LED:UV:OFF` | Single-channel — UV fluorescence doesn't need directional lighting the way photometric stereo does. |
 
-`FIRMWARE_LED_READY` in `main_pipeline.py` gates whether `photometric_stereo.py`/`multispectral.py` trust their captures as scientifically valid — flip to `True` once this is confirmed live and tested, not just merged.
+`FIRMWARE_LED_READY` in `config.py` gates whether advanced lighting captures
+may be trusted. Flip it to `True` only after live bench verification. UV is
+not an infrared source, so it must never be substituted for the IR frame
+required by `multispectral.py`.
 
 ## Sensors
 
@@ -56,6 +59,10 @@
 |---|---|---|
 | `STATUS` | `{"front": <float cm>, "side": <float cm>, "ir_1": <int>, "ir_2": <int>, "ir_3": <int>, "loadcell_raw": <int>}` | JSON, no `OK:` prefix — a data query, not an action. **No battery voltage field.** No encoder fields — encoders are permanently removed from this project (Master's decision), not a temporary gap. `ir_1`-`3` purpose currently unconfirmed — asked, not yet answered. |
 | `GPS_STATUS` | `{"fix": <bool>, "lat": <float>, "lon": <float>, "sats": <int>}` | JSON, matches `STATUS`'s pattern. Polled on request only — firmware does not push GPS data unprompted. NEO-7M updates at ~1Hz; polling faster doesn't get fresher data. GPS parsed continuously in the background via TinyGPS++ on `Serial3`; raw NMEA bytes are never written back to `Serial` under any code path — this was a deliberate design decision after a specific risk flag, not an oversight to "simplify" later. |
+| `ATTITUDE` | `{"ok": <bool>, "roll": <float deg>, "pitch": <float deg>, "yaw": <float deg>, "biased": <bool>, "hz": <float>}` | JSON, same no-prefix data-query pattern as `STATUS`. GY-80 (ADXL345 + L3G4200D + HMC5883L), fused in firmware with a Mahony filter at 100Hz. `roll`/`pitch` are ±180/±90; `yaw` is **0..360**, not signed — the dashboard's compass rose depends on that. `ok: false` means no IMU was detected on the I2C bus at boot; every angle will read 0.00 and should be shown as "no signal", not as level. `biased: false` means the gyro zero-rate offset was never measured, so yaw will creep. Polled, not pushed — the firmware integrates continuously in `loop()` but only reports when asked. |
+| `IMU:CALIBRATE` | `OK:IMU:CALIBRATE` / `ERR:IMU_ABSENT` | Re-measures gyro zero-rate offset by averaging 200 samples at rest. **Blocks the firmware for ~200 ms** — do not call it inside a drive loop. The rover must be stationary; firmware cannot detect that it isn't, so calibrating while moving bakes the motion into the bias. Also run once automatically at boot. |
+
+The GY-80 supersedes the MPU6050 listed as unconfirmed in the firmware's integration note 7. It is three separate dies with no on-chip fusion and no calibration-status register, which is why orientation is computed on the Mega rather than read out of the sensor. Mahony was chosen over Madgwick because its correction step is a cross-product plus a PI term rather than a gradient-descent step with an inverse square root — on an FPU-less ATmega2560 that is what keeps the filter at 100Hz.
 
 `mission_tree.py`'s supervisor uses `front`/`side` for a collision guard. The wheel-stall detector it also contains is permanently dormant — it handles missing encoder fields safely (`None`, not a crash) but has no sensor to actually check against anymore.
 

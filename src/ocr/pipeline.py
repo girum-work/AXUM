@@ -44,6 +44,14 @@ from config import (
     OCR_USE_BEAM_DECODE,
     OCR_USE_STONE_AUGMENT,
     OCR_USE_WEIGHTED_SAMPLER,
+    OCR_CTC_SEQ_LEN,
+)
+from src.ocr.training_contract import (
+    charset_fingerprint,
+    compute_sequence_metrics,
+    label_fits_ctc,
+    min_ctc_timesteps,
+    normalize_ocr_label,
 )
 from src.ocr.model import (
     BLANK_IDX,
@@ -58,6 +66,32 @@ from src.ocr.model import (
 # ═══════════════════════════════════════════════════════════════
 # SECTION 1 — IMAGE PREPROCESSING FOR OCR
 # ═══════════════════════════════════════════════════════════════
+
+
+def resize_pad_image(
+    image: np.ndarray,
+    target_size: tuple[int, int] = OCR_IMG_SIZE,
+    fill: int = 255,
+) -> np.ndarray:
+    """Resize without distortion and center on a fixed OCR canvas."""
+    target_height, target_width = target_size
+    height, width = image.shape[:2]
+    if height < 1 or width < 1:
+        raise ValueError(f"invalid OCR image shape: {image.shape}")
+    scale = min(target_width / width, target_height / height)
+    resized_width = max(1, min(target_width, round(width * scale)))
+    resized_height = max(1, min(target_height, round(height * scale)))
+    resized = cv2.resize(
+        image,
+        (resized_width, resized_height),
+        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC,
+    )
+    canvas_shape = (target_height, target_width, *image.shape[2:])
+    canvas = np.full(canvas_shape, fill, dtype=image.dtype)
+    top = (target_height - resized_height) // 2
+    left = (target_width - resized_width) // 2
+    canvas[top : top + resized_height, left : left + resized_width] = resized
+    return canvas
 
 
 def preprocess_for_ocr(
@@ -112,7 +146,7 @@ def preprocess_for_ocr(
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         processed = cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, kernel)
 
-    resized = cv2.resize(processed, (128, 32), interpolation=cv2.INTER_CUBIC)
+    resized = resize_pad_image(processed)
 
     pil_img = Image.fromarray(resized)
 
@@ -260,8 +294,7 @@ def build_stone_inscription_transform():
 
     return A.Compose(
         [
-            A.Resize(38, 150),
-            A.RandomCrop(32, 128),
+            A.Lambda(image=lambda image, **_kwargs: resize_pad_image(image)),
             A.OneOf(
                 [
                     A.Emboss(alpha=(0.4, 0.8), strength=(0.4, 0.8), p=1.0),
@@ -524,6 +557,8 @@ class HHDEthiopicDataset(Dataset):
         max_samples_per_class: int = 500,
         augment: bool = True,
         use_stone_augment: bool = None,
+        manifest_path: str | Path | None = None,
+        image_dir: str | Path | None = None,
     ):
         """
         Args:
@@ -538,6 +573,8 @@ class HHDEthiopicDataset(Dataset):
         self.augment = augment and (split == "train")
         self.samples = []
         self.albu_transform = None
+        self.manifest_path = Path(manifest_path) if manifest_path else None
+        self.manifest_image_dir = Path(image_dir) if image_dir else None
 
         if use_stone_augment is None:
             use_stone_augment = OCR_USE_STONE_AUGMENT
@@ -562,8 +599,11 @@ class HHDEthiopicDataset(Dataset):
         if self.augment:
             return transforms.Compose(
                 [
-                    transforms.Resize((36, 140)),  # slightly larger
-                    transforms.RandomCrop((32, 128)),  # random crop
+                    transforms.Lambda(
+                        lambda image: Image.fromarray(
+                            resize_pad_image(np.array(image), OCR_IMG_SIZE)
+                        )
+                    ),
                     transforms.RandomRotation(
                         degrees=8,
                         fill=255,  # fill with white
@@ -578,7 +618,11 @@ class HHDEthiopicDataset(Dataset):
         else:
             return transforms.Compose(
                 [
-                    transforms.Resize((32, 128)),
+                    transforms.Lambda(
+                        lambda image: Image.fromarray(
+                            resize_pad_image(np.array(image), OCR_IMG_SIZE)
+                        )
+                    ),
                     transforms.Grayscale(num_output_channels=1),
                     transforms.ToTensor(),
                     transforms.Normalize((0.5,), (0.5,)),
@@ -599,6 +643,36 @@ class HHDEthiopicDataset(Dataset):
             return
 
         import csv
+
+        if self.manifest_path is not None:
+            if not self.manifest_path.exists():
+                logger.error(f"OCR manifest not found: {self.manifest_path}")
+                return
+            image_dir = self.manifest_image_dir or self.manifest_path.parent
+            with open(self.manifest_path, "r", encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+            rejected = 0
+            for row in rows:
+                if len(row) < 2:
+                    rejected += 1
+                    continue
+                image_name = row[0].strip()
+                text = normalize_ocr_label(row[1])
+                image_path = image_dir / image_name
+                if (
+                    not image_name
+                    or not image_path.exists()
+                    or not label_fits_ctc(text, OCR_CTC_SEQ_LEN)
+                    or any(character not in CHAR_TO_IDX for character in text)
+                ):
+                    rejected += 1
+                    continue
+                self.samples.append((image_path, text))
+            logger.info(
+                f"Explicit OCR manifest loaded: {len(self.samples)} samples, "
+                f"{rejected} rejected ({self.manifest_path})"
+            )
+            return
 
         # Style B: CSV-based dataset — prefer when any subdir has the pairs file
         csv_subset_dir = None
@@ -630,8 +704,12 @@ class HHDEthiopicDataset(Dataset):
                 if len(row) < 2:
                     continue
                 img_name = row[0].strip()
-                text = row[1].strip()
+                text = normalize_ocr_label(row[1])
                 if not text:
+                    continue
+                if not label_fits_ctc(text, OCR_CTC_SEQ_LEN):
+                    continue
+                if any(character not in CHAR_TO_IDX for character in text):
                     continue
                 img_path = img_dir / img_name
                 if img_path.exists():
@@ -795,9 +873,21 @@ def ctc_collate_fn(batch: list) -> tuple:
     images = torch.stack(images, 0)
     labels = torch.cat(labels_list, 0)
 
-    input_lengths = torch.full((len(images),), fill_value=26, dtype=torch.long)
+    input_lengths = torch.full(
+        (len(images),), fill_value=OCR_CTC_SEQ_LEN, dtype=torch.long
+    )
 
     label_lengths = torch.stack([l.clone().detach() for l in label_lengths]).long()
+
+    offset = 0
+    for length in label_lengths.tolist():
+        sequence = labels[offset : offset + length].tolist()
+        required = length + sum(left == right for left, right in zip(sequence, sequence[1:]))
+        if required > OCR_CTC_SEQ_LEN:
+            raise ValueError(
+                f"CTC target requires {required} steps but model provides {OCR_CTC_SEQ_LEN}"
+            )
+        offset += length
 
     return images, labels, input_lengths, label_lengths
 
@@ -995,6 +1085,9 @@ def _save_resume_checkpoint(
         "best_val_loss": best_val_loss,
         "patience_counter": patience_counter,
         "epoch_metrics": epoch_metrics,
+        "charset_fingerprint": charset_fingerprint(GEEZ_CHARSET),
+        "image_size": list(OCR_IMG_SIZE),
+        "ctc_seq_len": OCR_CTC_SEQ_LEN,
     }, tmp_path)
 
     tmp_path.replace(checkpoint_path)  # atomic on POSIX and Windows (NTFS)
@@ -1014,6 +1107,11 @@ def train_ocr_model(
     max_train_batches: int = None,
     max_val_batches: int = None,
     device: str = None,
+    encoder_checkpoint: Path | None = None,
+    initial_model: Path | None = None,
+    freeze_encoder_epochs: int = 3,
+    encoder_lr_scale: float = 0.1,
+    seed: int = 42,
 ) -> dict:
     """
     Train the Ge'ez OCR model using CTC loss.
@@ -1049,6 +1147,14 @@ def train_ocr_model(
         use_stone_augment = OCR_USE_STONE_AUGMENT
     if use_adaptive_binarize is None:
         use_adaptive_binarize = OCR_USE_ADAPTIVE_BINARIZE
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     if device is not None:
         # Explicit override requested (e.g. train_ocr.py's --device flag).
@@ -1133,7 +1239,28 @@ def train_ocr_model(
     )
 
     # ── Model ─────────────────────────────────────────────────
-    model = GeezOCRModel(num_classes=len(GEEZ_CHARSET)).to(device)
+    if encoder_checkpoint is not None and initial_model is not None:
+        raise ValueError("encoder_checkpoint and initial_model are mutually exclusive")
+    if initial_model is not None:
+        model = load_ocr_model(initial_model).to(device)
+        model.train()
+        logger.info(f"Warm-started full OCR model: {initial_model}")
+    else:
+        model = GeezOCRModel(num_classes=len(GEEZ_CHARSET)).to(device)
+    transferred_encoder = False
+    if encoder_checkpoint is not None:
+        checkpoint = torch.load(encoder_checkpoint, map_location="cpu")
+        checkpoint_size = checkpoint.get("image_size")
+        if checkpoint_size and list(checkpoint_size) != list(OCR_IMG_SIZE):
+            raise ValueError(
+                f"Encoder checkpoint image size {checkpoint_size} does not match {OCR_IMG_SIZE}"
+            )
+        model.cnn.load_state_dict(checkpoint["cnn_state_dict"], strict=True)
+        transferred_encoder = True
+        logger.info(f"Loaded isolated-glyph encoder: {encoder_checkpoint}")
+        if freeze_encoder_epochs > 0:
+            for parameter in model.cnn.parameters():
+                parameter.requires_grad = False
 
     # ── CTC Loss ──────────────────────────────────────────────
     # blank=BLANK_IDX: which class index represents the blank token
@@ -1142,9 +1269,30 @@ def train_ocr_model(
     ctc_loss = nn.CTCLoss(blank=BLANK_IDX, reduction="mean", zero_infinity=True)
 
     # ── Optimizer ─────────────────────────────────────────────
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=learning_rate, weight_decay=1e-4
-    )
+    if transferred_encoder:
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": model.cnn.parameters(), "lr": learning_rate * encoder_lr_scale},
+                {
+                    "params": [
+                        parameter
+                        for name, parameter in model.named_parameters()
+                        if not name.startswith("cnn.")
+                    ],
+                    "lr": learning_rate,
+                },
+            ],
+            weight_decay=1e-4,
+        )
+        max_learning_rate: float | list[float] = [
+            learning_rate * 10 * encoder_lr_scale,
+            learning_rate * 10,
+        ]
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=learning_rate, weight_decay=1e-4
+        )
+        max_learning_rate = learning_rate * 10
 
     # ── LR Scheduler ──────────────────────────────────────────
     # IMPORTANT: built with the FULL original num_epochs regardless of
@@ -1157,7 +1305,7 @@ def train_ocr_model(
     # then restore its internal step counter via load_state_dict() below.
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=learning_rate * 10,
+        max_lr=max_learning_rate,
         epochs=num_epochs,
         steps_per_epoch=max(1, len(train_loader)),
         pct_start=0.1,  # 10% of training = warmup phase
@@ -1184,6 +1332,13 @@ def train_ocr_model(
     if checkpoint_path.exists():
         logger.info(f"Found resume checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
+        expected_fingerprint = charset_fingerprint(GEEZ_CHARSET)
+        if checkpoint.get("charset_fingerprint") != expected_fingerprint:
+            raise ValueError("Resume checkpoint charset is missing or incompatible")
+        if checkpoint.get("image_size") != list(OCR_IMG_SIZE):
+            raise ValueError("Resume checkpoint OCR image size is incompatible")
+        if checkpoint.get("ctc_seq_len") != OCR_CTC_SEQ_LEN:
+            raise ValueError("Resume checkpoint CTC sequence length is incompatible")
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -1206,6 +1361,10 @@ def train_ocr_model(
     print("Press Ctrl+C to stop (best model is saved automatically)\n")
 
     for epoch in range(start_epoch, num_epochs):
+        if transferred_encoder and epoch == freeze_encoder_epochs:
+            for parameter in model.cnn.parameters():
+                parameter.requires_grad = True
+            logger.info(f"Unfroze transferred visual encoder at epoch {epoch + 1}")
         # ── Train ─────────────────────────────────────────────
         model.train()
         train_losses = []
@@ -1265,8 +1424,8 @@ def train_ocr_model(
         # ── Validate ──────────────────────────────────────────
         model.eval()
         val_losses = []
-        correct_chars = 0
-        total_chars = 0
+        val_references: list[str] = []
+        val_predictions: list[str] = []
 
         with torch.no_grad():
             for batch_idx, (images, labels, input_lengths, label_lengths) in enumerate(
@@ -1295,19 +1454,20 @@ def train_ocr_model(
                     true_t = "".join(IDX_TO_CHAR.get(i, "") for i in true_l)
                     label_offset += ll
 
-                    # Character-level accuracy
-                    for pc, tc in zip(text, true_t):
-                        total_chars += 1
-                        correct_chars += pc == tc
+                    val_references.append(true_t)
+                    val_predictions.append(text)
 
         avg_val_loss = np.mean(val_losses) if val_losses else 0
-        char_accuracy = correct_chars / total_chars if total_chars > 0 else 0
+        sequence_metrics = compute_sequence_metrics(val_references, val_predictions)
+        char_accuracy = sequence_metrics.character_accuracy
 
         print(
             f"\nEpoch {epoch + 1:3d}/{num_epochs} | "
             f"Train: {avg_train_loss:.4f} | "
             f"Val: {avg_val_loss:.4f} | "
-            f"CharAcc: {char_accuracy:.1%}"
+            f"CER: {sequence_metrics.cer:.1%} | "
+            f"CharAcc: {char_accuracy:.1%} | "
+            f"SeqAcc: {sequence_metrics.sequence_accuracy:.1%}"
         )
 
         epoch_metrics.append(
@@ -1315,7 +1475,9 @@ def train_ocr_model(
                 "epoch": epoch + 1,
                 "train_loss": float(avg_train_loss),
                 "val_loss": float(avg_val_loss),
+                "cer": float(sequence_metrics.cer),
                 "char_accuracy": float(char_accuracy),
+                "sequence_accuracy": float(sequence_metrics.sequence_accuracy),
             }
         )
 
@@ -1371,6 +1533,11 @@ def train_ocr_model(
             "use_beam_val_decode": use_beam_val_decode,
             "use_stone_augment": use_stone_augment,
             "use_adaptive_binarize": use_adaptive_binarize,
+            "encoder_checkpoint": str(encoder_checkpoint) if encoder_checkpoint else None,
+            "initial_model": str(initial_model) if initial_model else None,
+            "freeze_encoder_epochs": freeze_encoder_epochs,
+            "encoder_lr_scale": encoder_lr_scale,
+            "seed": seed,
         },
     }
 

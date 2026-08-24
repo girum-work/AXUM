@@ -25,7 +25,7 @@ from typing import Any
 
 from loguru import logger
 
-from behavior_tree import (
+from src.mission.behavior_tree import (
     ActionNode,
     Blackboard,
     ConditionNode,
@@ -248,8 +248,8 @@ def _make_action_scan(pipeline) -> Any:
             bb.set("reference_frame", scan["reference_frame"])
             bb.set("mesh_photo_count", scan["mesh_photo_count"])
             bb.set("quad_paths", scan["quad_paths"])
-            bb.set("uv_path", scan["uv_path"])
-            bb.set("nir_path", scan["nir_path"])
+            bb.set("visible_path", scan["visible_path"])
+            bb.set("ir_path", scan["ir_path"])
             return Status.SUCCESS
         except Exception as exc:
             logger.warning(f"{object_id}: scan failed: {exc}")
@@ -281,34 +281,26 @@ def _make_action_analyze(pipeline) -> Any:
             # calling it with a path dict + artefact_id= would raise
             # TypeError the first time this phase actually ran. The
             # path-based entry point is analyse_photometric_paths().
-            from src.imaging.photometric_stereo import analyse_photometric_paths
-            ps_result = analyse_photometric_paths(bb.get("quad_paths"))
+            quad_paths = bb.get("quad_paths")
+            if quad_paths:
+                from src.imaging.photometric_stereo import analyse_photometric_paths
+                analyse_photometric_paths(quad_paths)
 
-            # BUGFIX, same class of bug: real run_multispectral() takes
-            # (visible_image, ir_image, crack_result=None) as arrays, no
-            # artefact_id. Path-based entry point is
-            # analyse_multispectral_paths(visible_path, ir_path).
-            # STILL UNRESOLVED, flagging rather than guessing: this
-            # blackboard uses "uv_path"/"nir_path" as key names, but
-            # multispectral.py's real concept is "visible"/"ir" -- and
-            # salt_mapper.py separately uses "uv_image" for a different
-            # purpose (UV fluorescence for salt mapping, not NDCI stress).
-            # Whether "uv_path" here is meant to BE the visible-light
-            # frame, and what "nir_path" is meant to be captured as, isn't
-            # resolvable until _scan_artefact() (which doesn't exist yet
-            # either -- see note below) actually defines what it saves
-            # under each key. Passing them through positionally as
-            # (visible, ir) is my best-guess mapping, not confirmed.
+            # Multispectral analysis requires a physically aligned visible/IR
+            # pair.  The current scan returns no IR path, so preserve the
+            # safe zero-stress fallback rather than mislabeling a UV-lit image
+            # as infrared data.
             from src.imaging.multispectral import analyse_multispectral_paths
-            ms_result = analyse_multispectral_paths(bb.get("uv_path"), bb.get("nir_path"))
-            # BUGFIX: MultispectralResult has no stress_score field at all
-            # (real fields: structural_hazard_score, surface_only_score,
-            # quality_score) -- ms_result.stress_score would AttributeError
-            # the first time this ran. Using structural_hazard_score as the
-            # closest real match to FragilityInputs.stress_score's
-            # documented meaning ("0-1 surface stress index") -- best
-            # semantic guess, not confirmed by whoever owns either module.
-            stress_score = ms_result.structural_hazard_score
+            visible_path = bb.get("visible_path")
+            ir_path = bb.get("ir_path")
+            ms_result = (
+                analyse_multispectral_paths(visible_path, ir_path)
+                if visible_path and ir_path
+                else None
+            )
+            # MultispectralResult has no stress_score field; its structural
+            # hazard score is the compatible input when an IR pair exists.
+            stress_score = ms_result.structural_hazard_score if ms_result else 0.0
             bb.set("stress_score", stress_score)
 
             from config import OBJ_CLASSES
@@ -377,7 +369,7 @@ def _make_action_return(pipeline) -> Any:
 
 # ── invariant predicates ─────────────────────────────────────────────
 
-def _vacuum_confirmed_sealed(bb: Blackboard) -> bool:
+def _grip_confirmed(bb: Blackboard) -> bool:
     """
     Safety invariant for TRANSFER: never move a picked artefact toward the
     turntable unless PICK reported real grip confidence, not just "no
@@ -449,9 +441,9 @@ def build_mission_tree(pipeline, object_id: str, sequence_number: int, recorder:
     pick = ConfidenceGate("PickConfidence", pick, confidence_key="grip_confidence", retry_below=0.5, abort_below=0.15)
 
     transfer = Invariant(
-        "VacuumSealedInvariant",
+        "GripConfirmedInvariant",
         Timeout("TransferTimeout", ActionNode("Transfer", _make_action_transfer(pipeline)), timeout_seconds=10),
-        predicate=_vacuum_confirmed_sealed,
+        predicate=_grip_confirmed,
         violation_message="Refusing TRANSFER: grip confidence too low to trust the object is actually held",
     )
 

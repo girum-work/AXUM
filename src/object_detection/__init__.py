@@ -21,6 +21,7 @@ from src.object_detection.detector import (
     detect_and_classify_tray,
     draw_detection_overlay
 )
+from src.object_detection.nav_detector import NavObstacleDetector
 
 __all__ = [
     "ArtefactClassifier",
@@ -28,5 +29,6 @@ __all__ = [
     "ArtefactDatabase",
     "detect_objects_in_tray",
     "detect_and_classify_tray",
-    "draw_detection_overlay"
+    "draw_detection_overlay",
+    "NavObstacleDetector",
 ]

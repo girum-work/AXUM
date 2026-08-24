@@ -8,10 +8,13 @@ Available now (mesh_stage.py):
     process_object_mesh(object_id)  — run Meshroom / publish OBJ
     process_demo_meshes()           — procedural demo OBJ for all catalogue entries
 
-Coming soon (main_pipeline.py — NOT YET ON DISK):
-    MissionPipeline, MissionState, SharedState — full autonomous mission
+Available now (main_pipeline.py):
+    MissionPipeline, MissionState, SharedState — end-to-end dry-run mission
+    loop, with live capture guarded until Pi camera and controlled lighting
+    have passed hardware bench verification.
 
-Lazy imports via __getattr__ so mesh stage works before main_pipeline exists.
+Lazy imports via __getattr__ keep startup light and avoid loading optional
+pipeline modules until a caller requests them.
 """
 
 __all__ = [
