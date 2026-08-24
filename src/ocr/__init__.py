@@ -14,8 +14,28 @@ Train:  python scripts/train_ocr.py  →  models/geez_ocr.pth
 Restore: src/ocr/llm_restoration.py fills [MISSING] tokens after OCR
 """
 
-from src.ocr.model    import GeezOCRModel, load_ocr_model, save_ocr_model
-from src.ocr.pipeline import GeezOCRPipeline, train_ocr_model
+# Imported lazily (PEP 562). Eager imports pulled pipeline -> object_detection
+# -> ultralytics, so `from src.ocr.damage import ...` needed the whole vision
+# stack despite damage.py being pure stdlib.
+_LAZY = {
+    "GeezOCRModel": "src.ocr.model",
+    "load_ocr_model": "src.ocr.model",
+    "save_ocr_model": "src.ocr.model",
+    "GeezOCRPipeline": "src.ocr.pipeline",
+    "train_ocr_model": "src.ocr.pipeline",
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        from importlib import import_module
+        return getattr(import_module(_LAZY[name]), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
+
 
 __all__ = [
     "GeezOCRModel",
