@@ -20,6 +20,7 @@ Author: Axum Rover Team
 from __future__ import annotations
 
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -27,6 +28,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Must be set before any EXR decode call -- OpenCV disables its OpenEXR
+# codec by default (CVE-2021-3574 mitigation) unless this is set.
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
+import cv2
+import numpy as np
 from loguru import logger
 
 import sys
@@ -228,19 +235,25 @@ def _parse_obj_stats(obj_path: Path) -> tuple[int, int]:
 
 def validate_mesh(obj_path: Path) -> tuple[bool, str]:
     """
-    Verify an OBJ is readable and contains geometry.
+    Verify a mesh file is readable and contains geometry.
+
+    Handles OBJ (Meshroom output) and GLB (binary glTF, the only mesh
+    format Smithsonian Open Access publishes -- they offer no OBJ or PLY).
 
     Args:
-        obj_path: Published or source OBJ path
+        obj_path: Published or source mesh path
 
     Returns:
         ``(ok, message)`` — message explains failure when ``ok`` is False
     """
     obj_path = Path(obj_path)
     if not obj_path.exists():
-        return False, f"OBJ not found: {obj_path}"
+        return False, f"Mesh not found: {obj_path}"
     if obj_path.stat().st_size < 32:
-        return False, f"OBJ too small: {obj_path}"
+        return False, f"Mesh too small: {obj_path}"
+
+    if obj_path.suffix.lower() == ".glb":
+        return _validate_glb(obj_path)
 
     vertices, faces = _parse_obj_stats(obj_path)
     if vertices < 4:
@@ -248,6 +261,42 @@ def validate_mesh(obj_path: Path) -> tuple[bool, str]:
     if faces < 4:
         return False, f"OBJ has too few faces ({faces}): {obj_path}"
     return True, f"OK — {vertices} vertices, {faces} faces"
+
+
+def _validate_glb(path: Path) -> tuple[bool, str]:
+    """
+    Check a binary glTF header without parsing the whole asset.
+
+    Counting triangles would mean decoding buffer views (and Draco, for
+    the compressed variants), which is not worth it just to answer "is
+    this file real". A truncated download is the failure that actually
+    happens, and the header's declared length catches exactly that.
+
+    Args:
+        path: GLB file path
+
+    Returns:
+        ``(ok, message)``
+    """
+    import struct
+
+    with open(path, "rb") as handle:
+        header = handle.read(12)
+    if len(header) < 12:
+        return False, f"GLB header truncated: {path}"
+
+    magic, version, declared = struct.unpack("<4sII", header)
+    if magic != b"glTF":
+        return False, f"Not a GLB (bad magic {magic!r}): {path}"
+    if version != 2:
+        return False, f"Unsupported GLB version {version}: {path}"
+
+    actual = path.stat().st_size
+    if actual < declared:
+        return False, (
+            f"GLB truncated — header declares {declared} bytes, file has {actual}: {path}"
+        )
+    return True, f"OK — glTF 2.0 binary, {actual} bytes"
 
 
 def _related_textures(source_obj: Path) -> list[Path]:
@@ -291,6 +340,43 @@ def _related_textures(source_obj: Path) -> list[Path]:
             seen.add(name)
             textures.append(path)
     return textures
+
+
+# Browsers decode <img>/Texture sources natively only for these formats;
+# Meshroom's Texturing node emits linear-light EXR (or TIFF), neither
+# of which a stock WebGL TextureLoader can read.
+_WEB_SAFE_TEXTURE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def _linear_to_srgb(image: np.ndarray) -> np.ndarray:
+    """Apply the sRGB OETF to Meshroom's scene-referred linear EXR/TIFF data."""
+    clipped = np.clip(image, 0.0, 1.0)
+    return np.where(
+        clipped <= 0.0031308,
+        clipped * 12.92,
+        1.055 * np.power(clipped, 1.0 / 2.4) - 0.055,
+    )
+
+
+def _convert_texture_to_png(source: Path, dest: Path) -> bool:
+    """
+    Convert an EXR/TIFF texture to a full-resolution 8-bit sRGB PNG.
+
+    Writing the raw linear float values as 8-bit without the sRGB transfer
+    function would render far too dark -- this preserves the actual
+    captured detail instead of falling back to a flat placeholder color.
+
+    Returns:
+        True on success; False if the source could not be decoded (caller
+        should degrade gracefully rather than publish a broken reference).
+    """
+    image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        return False
+    if image.dtype != np.uint8:
+        image = (_linear_to_srgb(image.astype(np.float32)) * 255.0).round().astype(np.uint8)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(dest), image))
 
 
 def _rewrite_mtl_texture_refs(mtl_path: Path, name_map: dict[str, str]) -> None:
@@ -372,9 +458,17 @@ def publish_mesh_export(
     texture_files: list[Path] = []
     tex_name_map: dict[str, str] = {}
     for idx, tex in enumerate(_related_textures(src_obj), start=1):
-        dest_name = f"texture_{idx:02d}{tex.suffix.lower()}"
-        dest_tex = dest_dir / dest_name
-        shutil.copy2(tex, dest_tex)
+        suffix = tex.suffix.lower()
+        if suffix in _WEB_SAFE_TEXTURE_SUFFIXES:
+            dest_name = f"texture_{idx:02d}{suffix}"
+            dest_tex = dest_dir / dest_name
+            shutil.copy2(tex, dest_tex)
+        else:
+            dest_name = f"texture_{idx:02d}.png"
+            dest_tex = dest_dir / dest_name
+            if not _convert_texture_to_png(tex, dest_tex):
+                warnings.append(f"Could not convert texture for browser display: {tex.name}")
+                continue
         texture_files.append(dest_tex)
         tex_name_map[tex.name] = dest_name
 
@@ -499,12 +593,14 @@ def run_meshroom_batch(
         cmd = [
             str(exe),
             "--batch",
+            "-p", "photogrammetryDraft",
             f"input={photo_dir.resolve()}",
             f"output={output_dir.resolve()}",
         ]
     else:
         cmd = [
             str(exe),
+            "--pipeline", "photogrammetryDraft",
             "--input", str(photo_dir.resolve()),
             "--output", str(output_dir.resolve()),
         ]
@@ -518,11 +614,32 @@ def run_meshroom_batch(
         timeout=timeout_sec,
     )
     elapsed = time.perf_counter() - t0
+    batch_log = output_dir / "meshroom_batch.log"
+    batch_log.write_text(
+        "[stdout]\n"
+        + (proc.stdout or "")
+        + "\n[stderr]\n"
+        + (proc.stderr or ""),
+        encoding="utf-8",
+    )
 
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "")[-2000:]
         raise RuntimeError(
             f"Meshroom failed (code {proc.returncode}) after {elapsed:.0f}s:\n{tail}"
+        )
+
+    combined_output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if "Error on node computation:" in combined_output:
+        tail = combined_output[-2000:]
+        raise RuntimeError(
+            f"Meshroom reported a node failure after {elapsed:.0f}s:\n{tail}"
+        )
+
+    if not any(path.name != batch_log.name for path in output_dir.iterdir()):
+        raise RuntimeError(
+            f"Meshroom exited successfully after {elapsed:.0f}s but produced no output. "
+            f"See {batch_log} for diagnostics."
         )
 
     logger.info(f"Meshroom finished in {elapsed:.0f}s → {output_dir}")

@@ -33,6 +33,8 @@
  *                                        note below re: Pi camera path
  *   PING                                returns PONG (connection check)
  *   GPS_STATUS                          {"fix":bool,"lat":...,"lon":...,"sats":...}
+ *   ATTITUDE                            {"ok":bool,"roll":...,"pitch":...,"yaw":...,"biased":bool,"hz":...}
+ *   IMU:CALIBRATE                       OK:IMU:CALIBRATE
  *   CAM_ARM_TRIGGER                     trigger arm-angle ESP32-CAM (Serial2)
  *   STOP                                emergency stop all motion
  *   STATUS                              returns sensor readings JSON
@@ -124,6 +126,42 @@
  *    NOT included, explicitly excluded per this request: 2x FSR sensors,
  *    piezo, MPU6050 IMU. No BOM/checkpoint confirmation seen for any of
  *    these -- ask again with that confirmation if they're real.
+ *
+ * 8. GY-80 9-axis IMU (I2C, confirmed hardware -- supersedes the MPU6050
+ *    exclusion in note 7, which was never confirmed and is not fitted).
+ *
+ *    The GY-80 is three independent dies on one breakout, not a fused
+ *    sensor like the BNO055 -- there is no on-chip DMP and no on-chip
+ *    calibration status byte, so orientation has to be fused in firmware:
+ *      - ADXL345   @ 0x53  accelerometer  (gravity reference: roll/pitch)
+ *      - L3G4200D  @ 0x69  gyroscope      (rate integration: all axes)
+ *      - HMC5883L  @ 0x1E  magnetometer   (heading reference: yaw)
+ *      - BMP085    @ 0x77  barometer      (not read -- altitude unused)
+ *
+ *    Fusion is Mahony, not Madgwick. Both were considered; Mahony is the
+ *    right pick for an ATmega2560 because its correction step is a plain
+ *    cross-product with a PI controller, whereas Madgwick runs a gradient
+ *    -descent step with an inverse square root every iteration. On an
+ *    8-bit AVR with no FPU that difference is the difference between
+ *    holding 100 Hz and not. Accuracy is equivalent for a ground vehicle
+ *    that never leaves roughly-level attitudes.
+ *
+ *    Read directly over Wire rather than via a driver library: the three
+ *    dies need ~8 register writes total to configure, and pulling in
+ *    three Adafruit libraries to save those writes would cost more flash
+ *    than the whole fusion filter.
+ *
+ *    Two gotchas worth writing down, both of which produce plausible-
+ *    looking-but-wrong output rather than an obvious failure:
+ *      - HMC5883L returns its axes in X, Z, Y order (not X, Y, Z) and
+ *        big-endian, unlike the other two dies which are little-endian
+ *        X, Y, Z. Reading it as XYZ silently swaps two axes and yaw
+ *        drifts in a way that looks like a calibration problem.
+ *      - The gyro must be biased at rest. An uncalibrated L3G4200D
+ *        typically sits at tens of LSB of zero-rate offset, which the
+ *        integrator turns into visible yaw creep within a minute.
+ *        IMU:CALIBRATE re-measures the bias; it is also run once at boot,
+ *        which assumes the rover is stationary at power-on.
  */
 
 #include <Servo.h>
@@ -257,6 +295,254 @@ const int POSE_PLACE_TABLE[5]  = {135, 85, 130, 80, 90};   // on turntable
 const int POSE_LIFT_TABLE[5]   = {135, 60, 100, 85, 160};  // lifted from table
 
 // ═══════════════════════════════════════════════════════════════
+// GY-80 IMU — I2C registers, Mahony AHRS state
+// See integration note #8 for why this is hand-rolled and why Mahony.
+// ═══════════════════════════════════════════════════════════════
+
+const uint8_t ADXL345_ADDR   = 0x53;
+const uint8_t ADXL345_POWER  = 0x2D;
+const uint8_t ADXL345_FORMAT = 0x31;
+const uint8_t ADXL345_BWRATE = 0x2C;
+const uint8_t ADXL345_DATAX0 = 0x32;
+
+const uint8_t L3G4200D_ADDR  = 0x69;
+const uint8_t L3G4200D_CTRL1 = 0x20;
+const uint8_t L3G4200D_CTRL4 = 0x23;
+const uint8_t L3G4200D_OUTX  = 0x28;
+
+const uint8_t HMC5883L_ADDR  = 0x1E;
+const uint8_t HMC5883L_CFGA  = 0x00;
+const uint8_t HMC5883L_CFGB  = 0x01;
+const uint8_t HMC5883L_MODE  = 0x02;
+const uint8_t HMC5883L_DATA  = 0x03;
+
+// ADXL345 in full-resolution mode is 3.9 mg/LSB at every range.
+const float ACCEL_LSB_G      = 0.0039f;
+// L3G4200D at the +/-250 dps range is 8.75 mdps/LSB.
+const float GYRO_LSB_DPS     = 0.00875f;
+const float DEG_TO_RADIANS   = 0.017453293f;
+const float RADIANS_TO_DEG   = 57.29577951f;
+
+// Mahony PI gains. Kp sets how hard accel/mag pull the estimate back to
+// the gravity/magnetic reference; Ki removes residual gyro bias. Ki is
+// deliberately small -- a large Ki fights the explicit bias subtraction
+// in imuCalibrate() and makes settling oscillate.
+const float MAHONY_TWO_KP    = 2.0f * 0.9f;
+const float MAHONY_TWO_KI    = 2.0f * 0.003f;
+
+const unsigned long IMU_PERIOD_US = 10000UL;   // 100 Hz fusion rate
+
+float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
+float integralFBx = 0.0f, integralFBy = 0.0f, integralFBz = 0.0f;
+float gyroBiasX = 0.0f, gyroBiasY = 0.0f, gyroBiasZ = 0.0f;
+float imuRoll = 0.0f, imuPitch = 0.0f, imuYaw = 0.0f;
+float imuRateHz = 0.0f;
+bool  imuPresent = false;
+bool  imuBiased  = false;
+unsigned long imuLastUpdateUs = 0;
+
+// ═══════════════════════════════════════════════════════════════
+// GY-80 IMU — low-level I2C
+// ═══════════════════════════════════════════════════════════════
+
+void i2cWrite(uint8_t addr, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(value);
+  Wire.endTransmission();
+}
+
+bool i2cPresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+// Reads `count` bytes into buf. Returns false on a short read so callers
+// can skip the fusion step rather than integrating whatever was left in
+// the buffer from the previous sample.
+bool i2cReadBytes(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t count) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(addr, count) != count) return false;
+  for (uint8_t i = 0; i < count; i++) buf[i] = Wire.read();
+  return true;
+}
+
+bool readAccel(float *ax, float *ay, float *az) {
+  uint8_t b[6];
+  if (!i2cReadBytes(ADXL345_ADDR, ADXL345_DATAX0, b, 6)) return false;
+  *ax = (int16_t)(b[0] | (b[1] << 8)) * ACCEL_LSB_G;
+  *ay = (int16_t)(b[2] | (b[3] << 8)) * ACCEL_LSB_G;
+  *az = (int16_t)(b[4] | (b[5] << 8)) * ACCEL_LSB_G;
+  return true;
+}
+
+bool readGyroRaw(float *gx, float *gy, float *gz) {
+  uint8_t b[6];
+  // Bit 7 of the register address is L3G4200D's auto-increment flag;
+  // without it every byte of the burst comes back from OUT_X_L.
+  if (!i2cReadBytes(L3G4200D_ADDR, L3G4200D_OUTX | 0x80, b, 6)) return false;
+  *gx = (int16_t)(b[0] | (b[1] << 8)) * GYRO_LSB_DPS;
+  *gy = (int16_t)(b[2] | (b[3] << 8)) * GYRO_LSB_DPS;
+  *gz = (int16_t)(b[4] | (b[5] << 8)) * GYRO_LSB_DPS;
+  return true;
+}
+
+bool readMag(float *mx, float *my, float *mz) {
+  uint8_t b[6];
+  if (!i2cReadBytes(HMC5883L_ADDR, HMC5883L_DATA, b, 6)) return false;
+  // Big-endian, and the axis order on the wire is X, Z, Y -- see note #8.
+  *mx = (int16_t)((b[0] << 8) | b[1]);
+  *mz = (int16_t)((b[2] << 8) | b[3]);
+  *my = (int16_t)((b[4] << 8) | b[5]);
+  return true;
+}
+
+// Averages the gyro at rest to find zero-rate offset. Blocking, ~200 ms.
+// The rover must be stationary; there is no way to detect that it isn't,
+// so a calibrate taken while moving will bake motion into the bias.
+void imuCalibrate() {
+  if (!imuPresent) return;
+  const int samples = 200;
+  float sx = 0, sy = 0, sz = 0;
+  int taken = 0;
+  for (int i = 0; i < samples; i++) {
+    float gx, gy, gz;
+    if (readGyroRaw(&gx, &gy, &gz)) {
+      sx += gx; sy += gy; sz += gz;
+      taken++;
+    }
+    delay(1);
+  }
+  if (taken == 0) return;
+  gyroBiasX = sx / taken;
+  gyroBiasY = sy / taken;
+  gyroBiasZ = sz / taken;
+  integralFBx = integralFBy = integralFBz = 0.0f;
+  imuBiased = true;
+}
+
+void imuBegin() {
+  imuPresent = i2cPresent(ADXL345_ADDR)
+            && i2cPresent(L3G4200D_ADDR)
+            && i2cPresent(HMC5883L_ADDR);
+  if (!imuPresent) return;
+
+  i2cWrite(ADXL345_ADDR, ADXL345_BWRATE, 0x0A);  // 100 Hz output
+  i2cWrite(ADXL345_ADDR, ADXL345_FORMAT, 0x0B);  // full res, +/-16 g
+  i2cWrite(ADXL345_ADDR, ADXL345_POWER,  0x08);  // leave standby
+
+  i2cWrite(L3G4200D_ADDR, L3G4200D_CTRL1, 0x0F); // 100 Hz, all axes on
+  i2cWrite(L3G4200D_ADDR, L3G4200D_CTRL4, 0x00); // +/-250 dps
+
+  i2cWrite(HMC5883L_ADDR, HMC5883L_CFGA, 0x70);  // 8 avg, 15 Hz
+  i2cWrite(HMC5883L_ADDR, HMC5883L_CFGB, 0xA0);  // +/-4.7 Ga
+  i2cWrite(HMC5883L_ADDR, HMC5883L_MODE, 0x00);  // continuous
+
+  delay(20);
+  imuCalibrate();
+  imuLastUpdateUs = micros();
+}
+
+// Mahony AHRS. Called from loop() at IMU_PERIOD_US; skips silently when
+// the IMU is absent so a rover built without one still runs everything
+// else. Degrades to 6-axis (accel + gyro) if the magnetometer reads zero,
+// which is what happens near a motor that has magnetised the compass.
+void imuUpdate() {
+  if (!imuPresent) return;
+
+  unsigned long now = micros();
+  unsigned long elapsed = now - imuLastUpdateUs;
+  if (elapsed < IMU_PERIOD_US) return;
+  imuLastUpdateUs = now;
+
+  float dt = elapsed * 1e-6f;
+  imuRateHz = 1.0f / dt;
+
+  float ax, ay, az, gxDps, gyDps, gzDps, mx, my, mz;
+  if (!readAccel(&ax, &ay, &az)) return;
+  if (!readGyroRaw(&gxDps, &gyDps, &gzDps)) return;
+  bool haveMag = readMag(&mx, &my, &mz);
+
+  float gx = (gxDps - gyroBiasX) * DEG_TO_RADIANS;
+  float gy = (gyDps - gyroBiasY) * DEG_TO_RADIANS;
+  float gz = (gzDps - gyroBiasZ) * DEG_TO_RADIANS;
+
+  float aNorm = sqrt(ax * ax + ay * ay + az * az);
+  if (aNorm > 0.0f) {
+    ax /= aNorm; ay /= aNorm; az /= aNorm;
+
+    float mNorm = haveMag ? sqrt(mx * mx + my * my + mz * mz) : 0.0f;
+    if (mNorm > 0.0f) { mx /= mNorm; my /= mNorm; mz /= mNorm; }
+    else              { haveMag = false; }
+
+    float q0q0 = q0 * q0, q0q1 = q0 * q1, q0q2 = q0 * q2, q0q3 = q0 * q3;
+    float q1q1 = q1 * q1, q1q2 = q1 * q2, q1q3 = q1 * q3;
+    float q2q2 = q2 * q2, q2q3 = q2 * q3, q3q3 = q3 * q3;
+
+    float halfex, halfey, halfez;
+
+    // Estimated gravity direction in the body frame.
+    float halfvx = q1q3 - q0q2;
+    float halfvy = q0q1 + q2q3;
+    float halfvz = q0q0 - 0.5f + q3q3;
+
+    if (haveMag) {
+      // Rotate the measured field into earth frame, flatten it onto the
+      // horizontal plane, then rotate the reference back into the body
+      // frame -- this is what stops magnetic dip from leaking into
+      // roll/pitch the way a naive 3-axis compare would.
+      float hx = 2.0f * (mx * (0.5f - q2q2 - q3q3) + my * (q1q2 - q0q3)   + mz * (q1q3 + q0q2));
+      float hy = 2.0f * (mx * (q1q2 + q0q3)        + my * (0.5f - q1q1 - q3q3) + mz * (q2q3 - q0q1));
+      float bx = sqrt(hx * hx + hy * hy);
+      float bz = 2.0f * (mx * (q1q3 - q0q2)        + my * (q2q3 + q0q1)   + mz * (0.5f - q1q1 - q2q2));
+
+      float halfwx = bx * (0.5f - q2q2 - q3q3) + bz * (q1q3 - q0q2);
+      float halfwy = bx * (q1q2 - q0q3)        + bz * (q0q1 + q2q3);
+      float halfwz = bx * (q0q2 + q1q3)        + bz * (0.5f - q1q1 - q2q2);
+
+      halfex = (ay * halfvz - az * halfvy) + (my * halfwz - mz * halfwy);
+      halfey = (az * halfvx - ax * halfvz) + (mz * halfwx - mx * halfwz);
+      halfez = (ax * halfvy - ay * halfvx) + (mx * halfwy - my * halfwx);
+    } else {
+      halfex = ay * halfvz - az * halfvy;
+      halfey = az * halfvx - ax * halfvz;
+      halfez = ax * halfvy - ay * halfvx;
+    }
+
+    if (MAHONY_TWO_KI > 0.0f) {
+      integralFBx += MAHONY_TWO_KI * halfex * dt;
+      integralFBy += MAHONY_TWO_KI * halfey * dt;
+      integralFBz += MAHONY_TWO_KI * halfez * dt;
+      gx += integralFBx; gy += integralFBy; gz += integralFBz;
+    }
+
+    gx += MAHONY_TWO_KP * halfex;
+    gy += MAHONY_TWO_KP * halfey;
+    gz += MAHONY_TWO_KP * halfez;
+  }
+
+  gx *= 0.5f * dt; gy *= 0.5f * dt; gz *= 0.5f * dt;
+  float qa = q0, qb = q1, qc = q2;
+  q0 += (-qb * gx - qc * gy - q3 * gz);
+  q1 += ( qa * gx + qc * gz - q3 * gy);
+  q2 += ( qa * gy - qb * gz + q3 * gx);
+  q3 += ( qa * gz + qb * gy - qc * gx);
+
+  float qNorm = sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+  if (qNorm <= 0.0f) return;
+  q0 /= qNorm; q1 /= qNorm; q2 /= qNorm; q3 /= qNorm;
+
+  imuRoll  = atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2)) * RADIANS_TO_DEG;
+  float sinPitch = 2.0f * (q0 * q2 - q3 * q1);
+  sinPitch = constrain(sinPitch, -1.0f, 1.0f);
+  imuPitch = asin(sinPitch) * RADIANS_TO_DEG;
+  imuYaw   = atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3)) * RADIANS_TO_DEG;
+  if (imuYaw < 0.0f) imuYaw += 360.0f;   // report 0..360, not -180..180
+}
+
+// ═══════════════════════════════════════════════════════════════
 // SETUP
 // ═══════════════════════════════════════════════════════════════
 
@@ -294,6 +580,10 @@ void setup() {
   ledDriver.begin();
   ledDriver.setPWMFreq(1000);
   allLedsOff();
+
+  // GY-80 IMU -- shares the PCA9685's I2C bus, so it has to come after
+  // Wire.begin(). Boot-time calibrate assumes the rover is stationary.
+  imuBegin();
 
   // Sensor pins
   pinMode(FRONT_TRIG, OUTPUT); pinMode(FRONT_ECHO, INPUT);
@@ -333,6 +623,11 @@ void loop() {
     gps.encode(Serial3.read());
   }
 
+  // Orientation has to be integrated continuously, not sampled when
+  // ATTITUDE is asked for -- a gyro only measures rate, so any gap in
+  // the integration is rotation the estimate never sees.
+  imuUpdate();
+
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
@@ -370,6 +665,30 @@ void processCommand(String cmd) {
       Serial.print("null");
     }
     Serial.println("}");
+    return;
+  }
+
+  // ── ATTITUDE ─────────────────────────────────────────────────
+  // Data query, so JSON with no OK: prefix -- same shape as STATUS and
+  // GPS_STATUS. Reports the running fusion estimate; it does not sample
+  // the sensors here (see loop()).
+  if (cmd == "ATTITUDE") {
+    Serial.print("{\"ok\":");     Serial.print(imuPresent ? "true" : "false");
+    Serial.print(",\"roll\":");   Serial.print(imuRoll, 2);
+    Serial.print(",\"pitch\":");  Serial.print(imuPitch, 2);
+    Serial.print(",\"yaw\":");    Serial.print(imuYaw, 2);
+    Serial.print(",\"biased\":"); Serial.print(imuBiased ? "true" : "false");
+    Serial.print(",\"hz\":");     Serial.print(imuRateHz, 1);
+    Serial.println("}");
+    return;
+  }
+
+  // ── IMU:CALIBRATE ────────────────────────────────────────────
+  // Blocks ~200 ms while it averages the gyro at rest.
+  if (cmd == "IMU:CALIBRATE") {
+    if (!imuPresent) { Serial.println("ERR:IMU_ABSENT"); return; }
+    imuCalibrate();
+    Serial.println("OK:IMU:CALIBRATE");
     return;
   }
 

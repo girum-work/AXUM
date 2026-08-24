@@ -50,6 +50,7 @@ mission_state = {
     "artefacts_total":  0,
     "log":              [],
     "catalogue":        [],
+    "attitude":         None,          # last RoverAttitude payload, see emit_attitude
 }
 
 # Dashboard server instance (singleton)
@@ -96,12 +97,58 @@ def emit_event(event_name: str, data: dict):
         treatment_protocol      — safe/unsafe intervention guardrail
         artefact_complete       — full artefact processed
         catalogue_updated       — new catalogue entry added
+        attitude_update         — GY-80 IMU roll/pitch/yaw
         mission_complete        — all artefacts processed
         robot_status            — general status update
         error                   — error occurred
     """
     socketio.emit(event_name, data)
     _log_event(event_name, data)
+
+
+def emit_attitude(roll: float, pitch: float, yaw: float, *,
+                  is_valid: bool = True, gyro_biased: bool = True,
+                  filter_hz: float = 0.0):
+    """
+    Push an orientation reading to the dashboard's attitude panel.
+
+    Mirrors ``RoverAttitude`` from ``src/arm/controller.py`` field for
+    field, so a caller polling the Arduino can forward a reading without
+    reshaping it::
+
+        att = arduino.attitude()
+        emit_attitude(att.roll, att.pitch, att.yaw,
+                      is_valid=att.is_valid,
+                      gyro_biased=att.gyro_biased,
+                      filter_hz=att.filter_hz)
+
+    Args:
+        roll:  Degrees, -180..180.
+        pitch: Degrees, -90..90.
+        yaw:   Degrees, 0..360 (the panel's compass rose assumes unsigned).
+        is_valid: False when no IMU is fitted. The panel then shows "no
+            signal" rather than drawing a level rover, which would be a
+            actively misleading readout on a tilted vehicle.
+        gyro_biased: False flags the reading as drifting in the UI.
+        filter_hz: Observed firmware fusion rate.
+
+    Rate: the firmware fuses at 100Hz but this is a WebSocket broadcast --
+    push at 10-20Hz. The panel interpolates between frames, so faster only
+    costs bandwidth.
+    """
+    payload = {
+        "roll":        round(float(roll), 2),
+        "pitch":       round(float(pitch), 2),
+        # Wrapped here rather than trusting callers: the panel's compass
+        # rose reads yaw as unsigned, and an out-of-range value renders as
+        # a plausible-looking wrong heading instead of an obvious error.
+        "yaw":         round(float(yaw) % 360.0, 2),
+        "is_valid":    bool(is_valid),
+        "gyro_biased": bool(gyro_biased),
+        "filter_hz":   round(float(filter_hz), 1),
+    }
+    mission_state["attitude"] = payload
+    emit_event("attitude_update", payload)
 
 
 def emit_camera_frame(frame: np.ndarray, overlays: dict = None):
@@ -275,10 +322,12 @@ def encode_image(image: np.ndarray, quality: int = 85) -> str:
 
 def _log_event(event_name: str, data: dict):
     """Internal: log emitted events for debugging."""
-    # Don't log camera frames — too verbose
-    if event_name != "camera_frame":
-        logger.debug(f"[WS] {event_name}: "
-                    f"{str(data)[:120]}{'...' if len(str(data)) > 120 else ''}")
+    # Camera frames and attitude are continuous telemetry — at 5fps and
+    # 15Hz respectively they bury every other line in the debug log.
+    if event_name in ("camera_frame", "attitude_update"):
+        return
+    logger.debug(f"[WS] {event_name}: "
+                f"{str(data)[:120]}{'...' if len(str(data)) > 120 else ''}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -288,7 +337,8 @@ def _log_event(event_name: str, data: dict):
 @app.route("/")
 def index():
     """Serve the main dashboard."""
-    return render_template("dashboard.html")
+    from config import DASHBOARD_FEATURE_MESH
+    return render_template("dashboard.html", feature_mesh=DASHBOARD_FEATURE_MESH)
 
 
 @app.route("/catalogue")
@@ -337,6 +387,65 @@ def api_mesh_status(object_id: str):
     return jsonify(get_mesh_status(object_id))
 
 
+@app.route("/api/mesh-preview/<object_id>")
+def api_mesh_preview(object_id: str):
+    """Return a catalogue-independent viewer entry for any published mesh folder."""
+    from src.catalogue.mesh_registry import preview_mesh_entry
+    entry = preview_mesh_entry(object_id)
+    if not entry:
+        abort(404)
+    return jsonify(entry)
+
+
+@app.route("/api/mesh-library")
+def api_mesh_library():
+    """
+    Return published meshes that have no catalogue record.
+
+    These are reconstructions like TEST-SCEAUX -- real Meshroom output
+    used to validate the photogrammetry pipeline, but not heritage
+    records. The catalogue grid appends them so the pipeline's actual
+    output is visible alongside catalogued artefacts, flagged as
+    ``is_preview`` so the UI can label them rather than passing them off
+    as scanned finds.
+    """
+    from src.catalogue.mesh_registry import preview_mesh_entry, scan_published_meshes
+    from src.catalogue.service import CatalogueService
+
+    catalogued = {o.get("object_id") for o in CatalogueService().load_all_objects()}
+    entries = []
+    for status in scan_published_meshes():
+        object_id = status.get("object_id")
+        if not object_id or object_id in catalogued:
+            continue
+        entry = preview_mesh_entry(object_id)
+        if entry:
+            entries.append(entry)
+    return jsonify(entries)
+
+
+@app.route("/api/rover-views")
+def api_rover_views():
+    """
+    Report which masked rover silhouettes are available to the attitude panel.
+
+    Drop ``top.png``, ``front.png`` and ``side.png`` into
+    ``src/dashboard/static/rover/`` and they are picked up on next page
+    load. Any view without a file falls back to the built-in SVG
+    silhouette, so a partial set is fine.
+    """
+    from config import ROVER_VIEW_DIR, ROVER_VIEW_EXTENSIONS
+
+    views = {}
+    for view in ("top", "front", "side"):
+        for ext in ROVER_VIEW_EXTENSIONS:
+            candidate = ROVER_VIEW_DIR / f"{view}{ext}"
+            if candidate.is_file():
+                views[view] = f"/static/rover/{candidate.name}"
+                break
+    return jsonify({"views": views, "dir": str(ROVER_VIEW_DIR)})
+
+
 @app.route("/models/<object_id>/<path:filename>")
 def serve_mesh(object_id: str, filename: str):
     """
@@ -377,6 +486,8 @@ def on_connect():
     """Send current state to newly connected client."""
     logger.info("Dashboard client connected")
     emit("state_sync", mission_state)
+    if mission_state["attitude"]:
+        emit("attitude_update", mission_state["attitude"])
     emit("log_message", {
         "message":   "Dashboard connected — AXUM Rover ready",
         "level":     "success",
@@ -506,6 +617,43 @@ def run_mission_in_background(
     return thread
 
 
+def start_attitude_simulation(*, rate_hz: float = 15.0) -> threading.Thread:
+    """
+    Drive the attitude panel with synthetic terrain motion.
+
+    For UI work and demos only -- this is NOT a model of the rover's
+    dynamics and must never run alongside a real IMU feed, or the panel
+    will show whichever emitter wrote last. Real telemetry path is
+    ``ArduinoSerial.attitude()`` -> ``emit_attitude()``.
+
+    Reports ``gyro_biased=True`` because a simulated signal has no drift;
+    the drift indicator is meaningful only for real hardware.
+
+    Returns:
+        The daemon thread, already started.
+    """
+    import math
+    import random
+
+    def _runner() -> None:
+        t = 0.0
+        period = 1.0 / rate_hz
+        heading = random.uniform(0, 360)
+        while True:
+            t += period
+            # Superimposed periods so no two axes look synchronised --
+            # a single shared frequency reads obviously fake.
+            roll = 6.5 * math.sin(t * 0.62) + 1.8 * math.sin(t * 2.7)
+            pitch = 8.0 * math.sin(t * 0.41 + 1.1) + 1.2 * math.sin(t * 3.3)
+            heading = (heading + 0.35 * math.sin(t * 0.23)) % 360.0
+            emit_attitude(roll, pitch, heading, filter_hz=100.0)
+            time.sleep(period)
+
+    thread = threading.Thread(target=_runner, daemon=True, name="axum-attitude-sim")
+    thread.start()
+    return thread
+
+
 def run_demo_sequence():
     """
     Simulate a complete mission for UI testing.
@@ -515,6 +663,8 @@ def run_demo_sequence():
 
     time.sleep(2)  # wait for browser to open
     logger.info("Starting demo sequence...")
+
+    start_attitude_simulation()
 
     log_message("AXUM Rover initializing...", "info")
     time.sleep(0.5)

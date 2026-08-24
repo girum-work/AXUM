@@ -30,12 +30,17 @@ CSV_NAME = "image_text_pairs_train.csv"
 IMG_DIR = "image_train"
 EXPORT_DIR = ROOT / "exports"
 OCR_EXPORT_FIX_ID = "ctc_filter_alignment_metrics_v1"
+OFFICIAL_TEST_SPLITS = {
+    "iid": ("test/test_rand", "image_text_pairs_test_rand.csv", "image_rand"),
+    "ood-18th": ("test/test_18th", "image_text_pairs_test_18th.csv", "image_18th"),
+}
 
 CODE_FILES = [
     "config.py",
     "scripts/train_ocr.py",
     "src/ocr/model.py",
     "src/ocr/pipeline.py",
+    "src/ocr/training_contract.py",
     "src/ocr/__init__.py",
     "src/__init__.py",
 ]
@@ -82,6 +87,7 @@ def verify_zip_archive(zip_path: Path, data_name: str) -> dict:
         "zip_images": 0,
         "csv_images_referenced": 0,
         "missing_in_zip": 0,
+        "official_test_splits": [],
     }
     prefix = f"{data_name}/train_raw"
     csv_arc = f"{prefix}/{CSV_NAME}"
@@ -116,6 +122,10 @@ def verify_zip_archive(zip_path: Path, data_name: str) -> dict:
                 and missing == 0
                 and abs(stats["zip_images"] - stats["csv_images_referenced"]) <= stats["csv_rows"] * 0.01
             )
+
+            for split_name, (rel_dir, split_csv, _split_img_dir) in OFFICIAL_TEST_SPLITS.items():
+                if f"{data_name}/{rel_dir}/{split_csv}" in names:
+                    stats["official_test_splits"].append(split_name)
     except zipfile.BadZipFile:
         stats["errors"].append("Not a valid zip file")
     except Exception as e:
@@ -171,6 +181,7 @@ def export_data_zip(
     data_root: Path,
     include_checkpoint: bool,
     include_code: bool,
+    include_official_tests: bool = True,
 ) -> None:
     """
     Build the Colab upload archive(s).
@@ -180,6 +191,10 @@ def export_data_zip(
         data_root: e.g. data/geez_merged or data/geez_characters
         include_checkpoint: Also pack models/geez_ocr.pth if it exists.
         include_code: Also pack a separate code zip for Colab.
+        include_official_tests: Also pack the official HHD IID / OOD-18th
+            test splits (small, ~37 MB) so Colab can run the same honest
+            evaluation as scripts/run_ocr_experiment.py, not just the
+            random train/val split.
     """
     train_raw = data_root / "train_raw"
     csv_path = train_raw / CSV_NAME
@@ -204,6 +219,20 @@ def export_data_zip(
         zf.write(csv_path, arcname=f"{prefix}/{CSV_NAME}")
         n_images = _add_tree(zf, img_dir, f"{prefix}/{IMG_DIR}", {".png", ".jpg", ".jpeg"})
 
+        included_splits: list[str] = []
+        if include_official_tests:
+            for split_name, (rel_dir, split_csv, split_img_dir) in OFFICIAL_TEST_SPLITS.items():
+                split_root = data_root / rel_dir
+                split_csv_path = split_root / split_csv
+                split_img_path = split_root / split_img_dir
+                if not split_csv_path.is_file() or not split_img_path.is_dir():
+                    logger.warning(f"Official split '{split_name}' not found under {split_root} — skipped")
+                    continue
+                split_prefix = f"{data_name}/{rel_dir}"
+                zf.write(split_csv_path, arcname=f"{split_prefix}/{split_csv}")
+                _add_tree(zf, split_img_path, f"{split_prefix}/{split_img_dir}", {".png", ".jpg", ".jpeg"})
+                included_splits.append(split_name)
+
         if include_checkpoint:
             ckpt = ROOT / "models" / "geez_ocr.pth"
             if ckpt.is_file():
@@ -215,6 +244,7 @@ def export_data_zip(
     size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"\nData archive: {output_path}")
     print(f"  Images:     {n_images}")
+    print(f"  Official test splits: {included_splits or 'none'}")
     print(f"  Size:       {size_mb:.1f} MB")
     print(f"\nIn Colab, after upload:")
     print(f"  !unzip -q {output_path.name} -d /content/data")
@@ -265,6 +295,12 @@ def main() -> None:
         action="store_true",
         help="Also create exports/geez_ocr_colab_code.zip",
     )
+    parser.add_argument(
+        "--no-official-tests",
+        dest="include_official_tests",
+        action="store_false",
+        help="Skip bundling the official HHD IID / OOD-18th test splits",
+    )
     args = parser.parse_args()
 
     output = args.output or (EXPORT_DIR / f"{args.data_root.name}_colab.zip")
@@ -274,7 +310,13 @@ def main() -> None:
         print(stats)
         sys.exit(0 if stats.get("ok") else 1)
 
-    export_data_zip(output, args.data_root, args.include_checkpoint, args.include_code)
+    export_data_zip(
+        output,
+        args.data_root,
+        args.include_checkpoint,
+        args.include_code,
+        args.include_official_tests,
+    )
 
     stats = verify_zip_archive(output, args.data_root.name)
     code_zip = EXPORT_DIR / "geez_ocr_colab_code.zip" if args.include_code else None

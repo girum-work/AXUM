@@ -7,25 +7,40 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --gold: #C9A84C; --dark: #1A1A2E; --mid: #2D3561;
-    --accent: #E94560; --green: #4CAF50; --amber: #FF9800;
-    --text: #ddd; --muted: #888; --border: #1a1a3a;
+    color-scheme: dark;
+    /* Blender/Fusion neutral grey scale — no hue, only value steps */
+    --grey-900: #141414;   /* deepest wells */
+    --grey-850: #1d1d1d;   /* app background */
+    --grey-800: #232323;   /* header / chrome */
+    --grey-750: #2b2b2b;   /* panels */
+    --grey-700: #333333;   /* cards / raised surfaces */
+    --grey-600: #3d3d3d;   /* hover */
+    --grey-500: #4a4a4a;   /* strong borders */
+    --stage:    #2e2e2e;   /* 3D viewport grey */
+    --gold: #C9A84C;
+    --accent: #D4574A; --green: #6FA96F; --amber: #D9963F;
+    --text: #e4e4e4; --muted: #9a9a9a; --border: #383838;
+    --dark: var(--grey-850); --mid: var(--grey-700);
   }
-  html, body { height: 100%; background: var(--dark); color: var(--text);
-                font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+  /* Background lives on <html> only: a background on <body> would paint over
+     #grid-canvas, which sits at z-index -1 behind the card grid. */
+  html { height: 100%; background: var(--dark); }
+  body { height: 100%; background: transparent; color: var(--text);
+         font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
   #app { display: flex; flex-direction: column; height: 100vh; }
 
-  header { background: #0d0d1f; border-bottom: 2px solid var(--gold);
+  header { background: var(--grey-800); border-bottom: 1px solid var(--border);
            padding: 10px 20px; display: flex; justify-content: space-between;
            align-items: center; flex-shrink: 0; }
   .logo { color: var(--gold); font-weight: 700; font-size: 18px; }
   .logo-sub { color: var(--muted); margin-left: 12px; font-size: 13px; }
 
   #main { display: flex; flex: 1; overflow: hidden; min-height: 0; }
-  #viewer-wrap { flex: 1; position: relative; background: #0a0a1a; min-width: 0; min-height: 200px; }
+  #viewer-wrap { flex: 1; position: relative; background: var(--stage); min-width: 0; min-height: 200px; }
   #viewer-canvas { position: absolute; inset: 0; cursor: grab; }
   #viewer-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
   #viewer-canvas:active { cursor: grabbing; }
@@ -42,19 +57,19 @@
                      border-radius: 20px; font-size: 11px; font-weight: 700;
                      display: none; }
   .viewer-hint { position: absolute; bottom: 52px; right: 12px;
-                 color: #444; font-size: 10px; }
+                 color: #7a7a7a; font-size: 10px; }
   .mesh-status { position: absolute; top: 12px; right: 12px;
                  font-size: 10px; padding: 4px 10px; border-radius: 12px;
-                 background: rgba(0,0,0,0.45); color: #888; }
-  .mesh-status.ready { color: #4CAF50; }
-  .mesh-status.error { color: #E94560; }
-  .mesh-status.placeholder { color: #888; }
+                 background: rgba(0,0,0,0.45); color: var(--muted); }
+  .mesh-status.ready { color: var(--green); }
+  .mesh-status.error { color: var(--accent); }
+  .mesh-status.placeholder { color: var(--muted); }
 
-  #info-panel { width: 340px; background: #12122a; overflow-y: auto;
+  #info-panel { width: 340px; background: var(--grey-750); overflow-y: auto;
                 padding: 16px 16px 80px; border-left: 1px solid var(--border);
                 flex-shrink: 0; }
   .obj-id { color: var(--gold); font-weight: 700; font-size: 20px; }
-  .obj-meta { color: #555; font-size: 11px; margin: 4px 0 12px; }
+  .obj-meta { color: var(--muted); font-size: 11px; margin: 4px 0 12px; }
   .section-head { border-left: 3px solid var(--gold); padding-left: 8px;
                   margin: 14px 0 6px; color: var(--gold); font-size: 11px;
                   font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; }
@@ -63,35 +78,89 @@
   .info-label { color: var(--muted); }
   .info-value { font-weight: 600; max-width: 55%; text-align: right; }
 
-  .inscription-box { background: #0a0a1a; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+  .inscription-box { background: var(--grey-900); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .geez-text { color: var(--gold); font-size: 18px; line-height: 1.6; }
-  .translation { color: #aaa; font-size: 12px; font-style: italic; margin-top: 4px; }
+  .translation { color: #b4b4b4; font-size: 12px; font-style: italic; margin-top: 4px; }
 
   .fragility-bar { margin-top: 8px; }
   .fragility-label { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 12px; }
   .bar-track { background: var(--border); border-radius: 4px; height: 6px; overflow: hidden; }
   .bar-fill { height: 100%; transition: width 1s; }
 
-  .group-box { background: #0a0a1a; border-radius: 6px; padding: 8px 10px; }
-  .group-btn { background: var(--mid); color: var(--gold); border: 1px solid var(--gold);
+  .group-box { background: var(--grey-900); border-radius: 6px; padding: 8px 10px; }
+  .group-btn { background: var(--grey-600); color: var(--gold); border: 1px solid var(--grey-500);
                padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer;
                width: 100%; margin-top: 8px; }
+  .group-btn:hover { background: var(--grey-500); border-color: var(--gold); }
   .intervention { color: var(--green); font-size: 12px; padding: 2px 0; }
 
-  #thumb-strip { background: #0d0d1f; border-top: 1px solid var(--border);
+  #thumb-strip { background: var(--grey-800); border-top: 1px solid var(--border);
                  padding: 10px 16px; display: flex; gap: 8px; overflow-x: auto;
                  flex-shrink: 0; }
   .thumb { display: flex; flex-direction: column; align-items: center;
            padding: 8px 12px; cursor: pointer; border-radius: 6px;
-           border: 1px solid #333; min-width: 80px; transition: all 0.2s; }
-  .thumb.active { background: var(--mid); border-color: var(--gold); }
-  .thumb-icon { width: 40px; height: 40px; border-radius: 50%; background: #333;
+           border: 1px solid var(--border); min-width: 80px; transition: all 0.2s; }
+  .thumb.active { background: var(--grey-700); border-color: var(--gold); }
+  .thumb-icon { width: 40px; height: 40px; border-radius: 50%; background: var(--grey-600);
                 display: flex; align-items: center; justify-content: center;
                 font-size: 18px; margin-bottom: 4px; }
   .thumb.active .thumb-icon { background: var(--gold); }
   .thumb-id { font-size: 10px; color: var(--muted); }
   .thumb.active .thumb-id { color: var(--gold); }
-  .thumb-class { font-size: 9px; color: #666; margin-top: 2px; }
+  .thumb-class { font-size: 9px; color: #8a8a8a; margin-top: 2px; }
+
+  /* ---- View switch ---- */
+  .view-switch { display: flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .view-switch button { background: var(--grey-750); color: var(--muted); border: none;
+                        padding: 5px 14px; font-size: 11px; font-weight: 600; cursor: pointer;
+                        letter-spacing: 1px; }
+  .view-switch button:hover { background: var(--grey-600); color: var(--text); }
+  .view-switch button.active { background: var(--grey-600); color: var(--gold); }
+
+  /* ---- Product grid ----
+     Cards stay transparent so the single shared WebGL canvas (z-index:-1)
+     shows through each .card-stage via scissor rendering. */
+  #grid-canvas { position: fixed; inset: 0; width: 100%; height: 100%;
+                 display: block; z-index: -1; pointer-events: none; }
+  #grid-view { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+               padding: 0 22px 48px; display: none; flex-direction: column; }
+  #grid-toolbar { position: sticky; top: 0; z-index: 2; background: var(--grey-850);
+                  padding: 14px 0 12px; display: flex; gap: 10px; align-items: center;
+                  border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+  #grid-search { flex: 1; max-width: 320px; background: var(--grey-750); color: var(--text);
+                 border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px;
+                 font-size: 12px; font-family: inherit; }
+  #grid-search:focus { outline: none; border-color: var(--grey-500); }
+  #grid-filter { background: var(--grey-750); color: var(--text); border: 1px solid var(--border);
+                 border-radius: 4px; padding: 6px 10px; font-size: 12px; font-family: inherit; }
+  #grid-count { margin-left: auto; color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+
+  #model-grid { display: grid; gap: 16px;
+                grid-template-columns: repeat(auto-fill, minmax(228px, 1fr)); }
+  .model-card { position: relative; border: 1px solid var(--border); border-radius: 4px;
+                cursor: pointer; background: transparent;
+                transition: border-color .15s, box-shadow .15s, transform .15s; }
+  .model-card:hover { border-color: var(--grey-500); transform: translateY(-2px);
+                      box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  .model-card.selected { border-color: var(--gold); }
+  .card-stage { height: 186px; }
+  .card-badges { position: absolute; top: 8px; left: 8px; display: flex; gap: 5px; }
+  .card-tag { font-size: 9px; font-weight: 700; letter-spacing: .5px;
+              padding: 2px 7px; border-radius: 10px; background: rgba(0,0,0,0.5);
+              color: var(--muted); border: 1px solid var(--border); }
+  .card-tag.new { color: var(--gold); border-color: var(--gold); }
+  .card-tag.scan { color: var(--green); border-color: var(--green); }
+  .card-spin { position: absolute; top: 8px; right: 10px; font-size: 9px;
+               color: #6d6d6d; opacity: 0; transition: opacity .15s; }
+  .model-card:hover .card-spin { opacity: 1; }
+  .card-meta { background: var(--grey-800); border-top: 1px solid var(--border);
+               border-radius: 0 0 3px 3px; padding: 9px 11px; }
+  .card-title { color: var(--text); font-size: 13px; font-weight: 600; }
+  .card-sub { color: var(--muted); font-size: 11px; margin-top: 2px;
+              display: flex; justify-content: space-between; gap: 8px; }
+  .card-health { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .card-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  #grid-empty { color: var(--muted); font-size: 12px; padding: 40px 0; text-align: center; }
 
   #loading { position: fixed; inset: 0; background: var(--dark); display: flex;
              align-items: center; justify-content: center; z-index: 50;
@@ -100,14 +169,33 @@
 </head>
 <body>
 <div id="loading">LOADING CATALOGUE...</div>
+<canvas id="grid-canvas"></canvas>
 <div id="app" style="display:none">
   <header>
     <div>
       <span class="logo">AXUM</span>
       <span class="logo-sub" id="header-sub">Heritage Catalogue</span>
     </div>
-    <span style="color:#555;font-size:12px" id="mission-id"></span>
+    <div style="display:flex;align-items:center;gap:16px">
+      <div class="view-switch">
+        <button id="btn-view-grid" class="active" onclick="setViewMode('grid')">GRID</button>
+        <button id="btn-view-detail" onclick="openDetail(selectedIdx)">DETAIL</button>
+      </div>
+      <span style="color:var(--muted);font-size:12px" id="mission-id"></span>
+    </div>
   </header>
+
+  <div id="grid-view">
+    <div id="grid-toolbar">
+      <input id="grid-search" type="search" placeholder="Search object ID, class or inscription…" autocomplete="off">
+      <select id="grid-filter">
+        <option value="">All classes</option>
+      </select>
+      <span id="grid-count"></span>
+    </div>
+    <div id="model-grid"></div>
+    <div id="grid-empty" style="display:none">No objects match this filter.</div>
+  </div>
 
   <div id="main">
     <div id="viewer-wrap">
@@ -133,6 +221,8 @@
 
 <script>
 const GOLD = 0xC9A84C, DARK = 0x7A6654, RESTORED = 0x8B6914;
+const STAGE_BG = 0x2e2e2e;
+const COLOR_OK = '#6FA96F', COLOR_BAD = '#D4574A', COLOR_WARN = '#D9963F', COLOR_IDLE = '#9a9a9a';
 let objects = [], groups = [], selectedIdx = 0, showRestored = false;
 let scene, camera, renderer, meshGroup, animId;
 let isDragging = false, prevMouse = {x:0,y:0}, rotX = 0, rotY = 0;
@@ -153,17 +243,45 @@ function classIcon(cls) {
 }
 
 function fragilityColor(years) {
-  return years < 15 ? '#E94560' : years < 50 ? '#FF9800' : '#4CAF50';
+  return years < 15 ? COLOR_BAD : years < 50 ? COLOR_WARN : COLOR_OK;
 }
 
 async function loadCatalogue() {
-  const [objRes, grpRes] = await Promise.all([
+  const previewId = new URLSearchParams(location.search).get('preview');
+  if (previewId) {
+    const res = await fetch(`/api/mesh-preview/${previewId}`);
+    if (!res.ok) {
+      document.getElementById('loading').textContent = `PREVIEW NOT FOUND: ${previewId}`;
+      return;
+    }
+    objects = [await res.json()];
+    groups = [];
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    document.getElementById('header-sub').textContent = `Mesh Preview · ${previewId}`;
+    buildThumbs();
+    buildGrid();
+    openDetail(0);
+    return;
+  }
+
+  const [objRes, grpRes, libRes] = await Promise.all([
     fetch('/api/catalogue'),
     fetch('/api/fragment-groups'),
+    fetch('/api/mesh-library'),
   ]);
   objects = await objRes.json();
   const grpData = await grpRes.json();
   groups = grpData.groups || grpData;
+
+  // Reconstructions with no catalogue record (e.g. the TEST-SCEAUX
+  // pipeline benchmark) still belong in the grid — they are the only
+  // real Meshroom output until mission captures land.
+  if (libRes.ok) {
+    const library = await libRes.json();
+    objects = objects.concat(library.filter(e => e && e.mesh_ready));
+  }
+
   if (!objects.length) {
     document.getElementById('loading').textContent = 'NO CATALOGUE ENTRIES — run: python scripts/seed_demo_catalogue.py';
     return;
@@ -173,7 +291,8 @@ async function loadCatalogue() {
   document.getElementById('header-sub').textContent =
     `Heritage Catalogue · ${objects.length} objects`;
   buildThumbs();
-  startViewer(() => selectObject(0));
+  buildGrid();
+  setViewMode('grid');
 }
 
 function buildThumbs() {
@@ -193,6 +312,7 @@ function buildThumbs() {
 function selectObject(idx) {
   selectedIdx = idx;
   buildThumbs();
+  markGridSelection();
   renderPanel(objects[idx]);
   loadMesh(objects[idx]);
 }
@@ -222,8 +342,8 @@ function renderPanel(obj) {
   }
 
   html += section('STRUCTURAL HEALTH');
-  html += row('Crack depth', obj.crack_depth_mm ? `${obj.crack_depth_mm} mm` : 'None', obj.crack_depth_mm > 1.5 ? '#E94560' : '#4CAF50');
-  html += row('Salt stage', obj.salt_stage || '—', (obj.salt_stage||'').includes('Active') ? '#E94560' : '#aaa');
+  html += row('Crack depth', obj.crack_depth_mm ? `${obj.crack_depth_mm} mm` : 'None', obj.crack_depth_mm > 1.5 ? COLOR_BAD : COLOR_OK);
+  html += row('Salt stage', obj.salt_stage || '—', (obj.salt_stage||'').includes('Active') ? COLOR_BAD : COLOR_IDLE);
   if (obj.fragility_years) {
     const col = fragilityColor(obj.fragility_years);
     const pct = Math.min(100, (obj.fragility_years / 200) * 100);
@@ -241,9 +361,9 @@ function renderPanel(obj) {
     const compl = Math.round((g.estimated_completeness||obj.group_conf||0)*100);
     html += section('FRAGMENT GROUP');
     html += `<div class="group-box">
-      <div>${obj.group_id} <span style="color:${GOLD===0xC9A84C?'#C9A84C':'gold'}">${Math.round((obj.group_conf||0)*100)}% match</span></div>
-      <div style="color:#666;font-size:11px;margin:6px 0">${nConf} confirmed · ${nPoss} possible · ~${compl}% complete</div>
-      <div style="color:#666;font-size:10px">Role: ${(obj.group_role||'').toUpperCase()}</div>
+      <div>${obj.group_id} <span style="color:#C9A84C">${Math.round((obj.group_conf||0)*100)}% match</span></div>
+      <div style="color:#9a9a9a;font-size:11px;margin:6px 0">${nConf} confirmed · ${nPoss} possible · ~${compl}% complete</div>
+      <div style="color:#8a8a8a;font-size:10px">Role: ${(obj.group_role||'').toUpperCase()}</div>
       <button class="group-btn" onclick="filterGroup('${obj.group_id}')">VIEW GROUP</button>
     </div>`;
   }
@@ -262,13 +382,13 @@ function renderPanel(obj) {
 
   html += section('3D MODEL');
   if (obj.mesh_ready) {
-    html += row('Mesh', obj.mesh_filename || 'model.obj', '#4CAF50');
-    html += row('Status', 'Meshroom export ready', '#4CAF50');
+    html += row('Mesh', obj.mesh_filename || 'model.obj', COLOR_OK);
+    html += row('Status', 'Meshroom export ready', COLOR_OK);
   } else if (obj.mesh_path) {
-    html += row('Mesh', obj.mesh_filename || Path.basename(obj.mesh_path), '#E94560');
-    html += row('Status', obj.mesh_status || 'File missing', '#E94560');
+    html += row('Mesh', obj.mesh_filename || Path.basename(obj.mesh_path), COLOR_BAD);
+    html += row('Status', obj.mesh_status || 'File missing', COLOR_BAD);
   } else {
-    html += row('Mesh', 'Not reconstructed yet', '#888');
+    html += row('Mesh', 'Not reconstructed yet', COLOR_IDLE);
   }
 
   document.getElementById('panel-sections').innerHTML = html;
@@ -279,7 +399,7 @@ function section(title) {
 }
 function row(label, value, color) {
   return `<div class="info-row"><span class="info-label">${label}</span>
-    <span class="info-value" style="color:${color||'#ddd'}">${value}</span></div>`;
+    <span class="info-value" style="color:${color||'#e4e4e4'}">${value}</span></div>`;
 }
 
 function filterGroup(groupId) {
@@ -334,11 +454,11 @@ function initViewer() {
   const { width, height } = viewerDimensions();
 
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x111122);
+  scene.background = new THREE.Color(STAGE_BG);
   camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
   camera.position.set(0, 0.1, 3);
   renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 3));
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -346,18 +466,18 @@ function initViewer() {
   mount.innerHTML = '';
   mount.appendChild(renderer.domElement);
 
-  scene.add(new THREE.HemisphereLight(0xf0f0ff, 0x2a2218, 0.55));
-  scene.add(new THREE.AmbientLight(0xffffff, 0.25));
-  const key = new THREE.DirectionalLight(0xffffff, 0.95);
+  scene.add(new THREE.HemisphereLight(0xf4f4f4, 0x1f1f1f, 0.35));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.12));
+  const key = new THREE.DirectionalLight(0xffffff, 0.80);
   key.position.set(4, 8, 6);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xc9a84c, 0.35);
+  const fill = new THREE.DirectionalLight(0xd8d8d8, 0.25);
   fill.position.set(-6, 2, -4);
   scene.add(fill);
-  const rim = new THREE.DirectionalLight(0xffffff, 0.25);
+  const rim = new THREE.DirectionalLight(0xffffff, 0.20);
   rim.position.set(0, -4, -8);
   scene.add(rim);
-  const grid = new THREE.GridHelper(4, 20, 0x444466, 0x2a2a44);
+  const grid = new THREE.GridHelper(4, 20, 0x121212, 0x0c0c0c);
   grid.position.y = -0.8;
   scene.add(grid);
 
@@ -386,17 +506,20 @@ function initViewer() {
 
   function animate() {
     animId = requestAnimationFrame(animate);
+    if (viewMode !== 'detail') return;
     if (!isDragging && meshGroup.children.length) meshGroup.rotation.y += 0.003;
     renderer.render(scene, camera);
   }
   animate();
 }
 
+// Colours are authored in linear space: the renderer's sRGB output encoding
+// lifts them roughly one stop, so these read lighter on screen than the hex.
 function makeCadMaterial(restored) {
   return new THREE.MeshStandardMaterial({
-    color: restored ? 0xC9A84C : 0xA8875C,
-    roughness: restored ? 0.38 : 0.52,
-    metalness: restored ? 0.18 : 0.06,
+    color: restored ? 0x8A6F2E : 0x4A4A4A,
+    roughness: restored ? 0.38 : 0.62,
+    metalness: restored ? 0.18 : 0.04,
     flatShading: false,
   });
 }
@@ -408,6 +531,8 @@ function setMeshStatus(text, kind) {
 }
 
 function prepareMeshForDisplay(model) {
+  const activeRenderer = renderer || gridRenderer;
+  const maxAnisotropy = activeRenderer ? activeRenderer.capabilities.getMaxAnisotropy() : 1;
   model.traverse(child => {
     if (!child.isMesh || !child.geometry) return;
     child.geometry.computeVertexNormals();
@@ -417,6 +542,7 @@ function prepareMeshForDisplay(model) {
       mat.flatShading = false;
       if (mat.map) {
         mat.map.encoding = THREE.sRGBEncoding;
+        mat.map.anisotropy = maxAnisotropy;
       }
     });
   });
@@ -445,6 +571,22 @@ function loadRealMesh(obj) {
   const basePath = objUrl.substring(0, objUrl.lastIndexOf('/') + 1);
   const objFile = obj.mesh_filename || Path.basename(obj.mesh_path);
   const mtlFile = objFile.replace(/\.obj$/i, '.mtl');
+  const WEB_SAFE_TEXTURE_EXT = ['.jpg', '.jpeg', '.png'];
+
+  // Smithsonian CC0 scans are glTF binaries — self-contained, so there is
+  // no MTL/texture resolution to do, and their PBR materials are kept.
+  if (/\.glb$/i.test(objFile)) {
+    return new Promise((resolve, reject) => {
+      if (typeof THREE.GLTFLoader === 'undefined') {
+        reject(new Error('GLTFLoader unavailable'));
+        return;
+      }
+      new THREE.GLTFLoader().load(objUrl, (gltf) => {
+        prepareMeshForDisplay(gltf.scene);
+        resolve(gltf.scene);
+      }, undefined, reject);
+    });
+  }
 
   return new Promise((resolve, reject) => {
     const objLoader = new THREE.OBJLoader();
@@ -458,25 +600,35 @@ function loadRealMesh(obj) {
       resolve(model);
     }
 
-    function loadObjOnly() {
-      objLoader.load(objUrl, onObjLoaded, undefined, reject);
-    }
-
-    if (typeof THREE.MTLLoader === 'undefined') {
+    function loadObjWithCadMaterial() {
       objLoader.load(objUrl, (model) => {
         applyCadMaterial(model, showRestored);
         onObjLoaded(model);
       }, undefined, reject);
+    }
+
+    if (typeof THREE.MTLLoader === 'undefined') {
+      loadObjWithCadMaterial();
       return;
     }
 
-    fetch(basePath + mtlFile, { method: 'HEAD' })
-      .then(resp => {
-        if (!resp.ok) {
-          objLoader.load(objUrl, (model) => {
-            applyCadMaterial(model, showRestored);
-            onObjLoaded(model);
-          }, undefined, reject);
+    fetch(basePath + mtlFile)
+      .then(resp => (resp.ok ? resp.text() : null))
+      .then(mtlText => {
+        if (mtlText === null) {
+          loadObjWithCadMaterial();
+          return;
+        }
+        // Meshroom can emit EXR/TIFF texture maps that browsers cannot
+        // decode via <img>; loading those anyway renders a broken/black
+        // material rather than a missing one, so treat it as absent.
+        const mapRefs = [...mtlText.matchAll(/^\s*map_\w+\s+(\S+)/gim)].map(m => m[1]);
+        const hasUnsupportedMap = mapRefs.some(ref => {
+          const ext = ref.slice(ref.lastIndexOf('.')).toLowerCase();
+          return !WEB_SAFE_TEXTURE_EXT.includes(ext);
+        });
+        if (hasUnsupportedMap) {
+          loadObjWithCadMaterial();
           return;
         }
         const mtlLoader = new THREE.MTLLoader();
@@ -484,10 +636,10 @@ function loadRealMesh(obj) {
         mtlLoader.load(mtlFile, (materials) => {
           materials.preload();
           objLoader.setMaterials(materials);
-          objLoader.load(objFile, onObjLoaded, undefined, reject);
-        }, undefined, loadObjOnly);
+          objLoader.load(objUrl, onObjLoaded, undefined, reject);
+        }, undefined, loadObjWithCadMaterial);
       })
-      .catch(loadObjOnly);
+      .catch(loadObjWithCadMaterial);
   });
 }
 
@@ -573,6 +725,232 @@ function loadMesh(obj) {
 
 // Path helper for mesh URL (browser has no pathlib)
 const Path = { basename: p => p.split(/[/\\]/).pop() };
+
+/* ==========================================================================
+   Product-grid view.
+   Every card shares ONE WebGL context and is drawn through a scissor rect,
+   because browsers cap live contexts at ~16 — a canvas per card would break
+   as soon as the catalogue grows.
+   ========================================================================== */
+let viewMode = 'grid';
+let gridRenderer = null, gridItems = [], gridAnimId = null, gridObserver = null;
+let gridMeshQueue = Promise.resolve();
+
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ESC_MAP[c]);
+
+function initGridRenderer() {
+  if (gridRenderer) return;
+  gridRenderer = new THREE.WebGLRenderer({
+    canvas: document.getElementById('grid-canvas'),
+    antialias: true,
+    alpha: true,
+  });
+  gridRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  gridRenderer.outputEncoding = THREE.sRGBEncoding;
+  gridRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+  gridRenderer.toneMappingExposure = 1.05;
+  gridRenderer.setClearColor(STAGE_BG, 1);
+  resizeGridRenderer();
+  if (gridAnimId === null) renderGridFrame();
+}
+
+function resizeGridRenderer() {
+  if (gridRenderer) gridRenderer.setSize(window.innerWidth, window.innerHeight, false);
+}
+
+function renderGridFrame() {
+  gridAnimId = requestAnimationFrame(renderGridFrame);
+  if (viewMode !== 'grid' || !gridRenderer) return;
+
+  const vh = window.innerHeight;
+  gridRenderer.setScissorTest(true);
+  for (const item of gridItems) {
+    if (item.el.style.display === 'none') continue;
+    const r = item.stage.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > vh) continue;
+
+    const w = Math.round(r.width), h = Math.round(r.height);
+    const left = Math.round(r.left), bottom = Math.round(vh - r.bottom);
+    gridRenderer.setViewport(left, bottom, w, h);
+    gridRenderer.setScissor(left, bottom, w, h);
+    if (item.camera.aspect !== w / h) {
+      item.camera.aspect = w / h;
+      item.camera.updateProjectionMatrix();
+    }
+
+    item.rotY += item.hover ? 0.020 : 0.0035;
+    if (!item.hover) item.rotX *= 0.94;
+    item.pivot.rotation.set(item.rotX, item.rotY, 0);
+    gridRenderer.render(item.scene, item.camera);
+  }
+  gridRenderer.setScissorTest(false);
+}
+
+function makeCardScene() {
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xf4f4f4, 0x1f1f1f, 0.32));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.10));
+  const key = new THREE.DirectionalLight(0xffffff, 0.72);
+  key.position.set(3, 6, 5);
+  scene.add(key);
+  const rim = new THREE.DirectionalLight(0xd8d8d8, 0.22);
+  rim.position.set(-5, 1, -4);
+  scene.add(rim);
+  const pivot = new THREE.Group();
+  scene.add(pivot);
+  return { scene, pivot };
+}
+
+function buildGrid() {
+  const wrap = document.getElementById('model-grid');
+  wrap.innerHTML = '';
+  gridItems = [];
+  if (gridObserver) gridObserver.disconnect();
+  gridObserver = new IntersectionObserver(onGridIntersect, {
+    root: document.getElementById('grid-view'),
+    rootMargin: '300px 0px',
+  });
+
+  objects.forEach((obj, i) => {
+    const card = document.createElement('article');
+    card.className = 'model-card' + (i === selectedIdx ? ' selected' : '');
+    card.dataset.index = String(i);
+
+    const shortId = (obj.object_id || '').split('-').pop();
+    const cls = obj.is_preview ? 'reconstruction'
+                               : (obj.class_name || 'unclassified').replace(/_/g, ' ');
+    const years = obj.fragility_years;
+    card.innerHTML = `
+      <div class="card-stage"></div>
+      <div class="card-badges">
+        ${obj.is_new_discovery ? '<span class="card-tag new">NEW</span>' : ''}
+        ${obj.is_preview ? '<span class="card-tag">REFERENCE</span>' : ''}
+        <span class="card-tag ${obj.mesh_ready ? 'scan' : ''}">${obj.mesh_ready ? 'SCAN' : 'PROXY'}</span>
+      </div>
+      <div class="card-spin">HOVER TO ROTATE</div>
+      <div class="card-meta">
+        <div class="card-title">${classIcon(obj.class_name)} ${esc(shortId)}</div>
+        <div class="card-sub">
+          <span>${esc(cls)}</span>
+          <span class="card-health">
+            <span class="card-dot" style="background:${years ? fragilityColor(years) : COLOR_IDLE}"></span>
+            ${years ? esc(years) + ' yr' : 'unrated'}
+          </span>
+        </div>
+      </div>`;
+
+    const { scene, pivot } = makeCardScene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+    camera.position.set(0, 0.3, 2.9);
+    camera.lookAt(0, 0, 0);
+
+    const item = {
+      obj, el: card, stage: card.querySelector('.card-stage'),
+      scene, pivot, camera,
+      rotX: 0, rotY: Math.random() * Math.PI * 2,
+      hover: false, loaded: false,
+      search: [obj.object_id, obj.class_name, obj.group_id,
+               obj.inscription_text, obj.translation_en,
+               materialFromDensity(obj.density_g_cm3)]
+              .filter(Boolean).join(' ').toLowerCase(),
+    };
+
+    let lastX = null, lastY = null;
+    card.addEventListener('pointerenter', e => {
+      item.hover = true; lastX = e.clientX; lastY = e.clientY;
+    });
+    card.addEventListener('pointerleave', () => { item.hover = false; lastX = null; });
+    card.addEventListener('pointermove', e => {
+      if (lastX === null) { lastX = e.clientX; lastY = e.clientY; return; }
+      item.rotY += (e.clientX - lastX) * 0.011;
+      item.rotX = Math.max(-0.6, Math.min(0.6, item.rotX + (e.clientY - lastY) * 0.006));
+      lastX = e.clientX; lastY = e.clientY;
+    });
+    card.addEventListener('click', () => openDetail(i));
+
+    gridItems.push(item);
+    wrap.appendChild(card);
+    gridObserver.observe(card);
+  });
+
+  buildClassFilter();
+  applyGridFilter();
+}
+
+function buildClassFilter() {
+  const select = document.getElementById('grid-filter');
+  const current = select.value;
+  const classes = [...new Set(objects.map(o => o.class_name).filter(Boolean))].sort();
+  select.innerHTML = '<option value="">All classes</option>' +
+    classes.map(c => `<option value="${esc(c)}">${esc(c.replace(/_/g, ' '))}</option>`).join('');
+  select.value = classes.includes(current) ? current : '';
+}
+
+function applyGridFilter() {
+  const q = (document.getElementById('grid-search').value || '').trim().toLowerCase();
+  const cls = document.getElementById('grid-filter').value;
+  let shown = 0;
+  gridItems.forEach(item => {
+    const match = (!cls || item.obj.class_name === cls) && (!q || item.search.includes(q));
+    item.el.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  document.getElementById('grid-count').textContent = `${shown} / ${gridItems.length} OBJECTS`;
+  document.getElementById('grid-empty').style.display = shown ? 'none' : 'block';
+}
+
+function markGridSelection() {
+  gridItems.forEach((item, i) => item.el.classList.toggle('selected', i === selectedIdx));
+}
+
+function onGridIntersect(entries) {
+  entries.forEach(entry => {
+    if (!entry.isIntersecting) return;
+    const item = gridItems[Number(entry.target.dataset.index)];
+    if (!item || item.loaded) return;
+    item.loaded = true;
+    loadGridMesh(item);
+  });
+}
+
+function loadGridMesh(item) {
+  const obj = item.obj;
+  item.pivot.add(buildPlaceholderMesh(obj));
+  if (!(obj.mesh_ready && obj.mesh_url)) return;
+  // Serialised so a large catalogue does not fire dozens of OBJ fetches at once.
+  gridMeshQueue = gridMeshQueue
+    .then(() => loadRealMesh(obj))
+    .then(model => {
+      while (item.pivot.children.length) item.pivot.remove(item.pivot.children[0]);
+      item.pivot.add(model);
+    })
+    .catch(err => console.warn('Grid mesh load failed:', obj.object_id, err));
+}
+
+function setViewMode(mode) {
+  viewMode = mode;
+  const isGrid = mode === 'grid';
+  document.getElementById('grid-view').style.display = isGrid ? 'flex' : 'none';
+  document.getElementById('grid-canvas').style.display = isGrid ? 'block' : 'none';
+  document.getElementById('main').style.display = isGrid ? 'none' : 'flex';
+  document.getElementById('thumb-strip').style.display = isGrid ? 'none' : 'flex';
+  document.getElementById('btn-view-grid').className = isGrid ? 'active' : '';
+  document.getElementById('btn-view-detail').className = isGrid ? '' : 'active';
+  if (isGrid) initGridRenderer();
+}
+
+function openDetail(idx) {
+  setViewMode('detail');
+  startViewer(() => selectObject(idx));
+}
+
+document.getElementById('grid-search').addEventListener('input', applyGridFilter);
+document.getElementById('grid-filter').addEventListener('change', applyGridFilter);
+window.addEventListener('resize', resizeGridRenderer);
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && viewMode === 'detail') setViewMode('grid');
+});
 
 loadCatalogue().catch(e => {
   document.getElementById('loading').textContent = 'CATALOGUE LOAD FAILED: ' + e.message;

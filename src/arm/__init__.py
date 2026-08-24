@@ -3,9 +3,11 @@ AXUM ROVER — Hardware Control Package
 ======================================
 WHAT:  Python interface to Arduino Mega (motors, arm, turntable, LEDs, sensors).
 WHY:   All robot motion goes through serial commands — never raw serial.write() elsewhere.
-STATUS: controller.py is NOT YET IMPLEMENTED — imports will fail until it exists.
+STATUS: controller.py implements the serial transport, arm, turntable, and
+camera interfaces. Hardware calls are safe to import but require the Arduino
+and Pi endpoints in config.py to be configured before a live mission.
 
-Expected classes (to be written in controller.py):
+Exports:
     ArduinoSerial      — send_command("PING"), retry, port auto-detect
     ArmController      — POSE:PICK, GRIP, ARM angle commands
     TurntableController — STEP/ROTATE + PHOTO sequence for 36-shot scan

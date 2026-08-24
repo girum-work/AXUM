@@ -5,27 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AXUM Rover — Conservation Dashboard</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <style>
   /* ── Reset & Base ─────────────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg:         #0a0c0f;
-    --surface:    #111318;
-    --border:     #1e2330;
-    --accent:     #c8963e;
-    --accent2:    #7b9e6b;
-    --text:       #e8dcc8;
-    --muted:      #6b7280;
-    --danger:     #c0392b;
-    --warning:    #d4820a;
-    --success:    #2e7d52;
-    --info:       #1a5276;
-    --crack:      #e74c3c;
-    --stress:     #e67e22;
-    --salt:       #f1c40f;
-    --inscription:#8e44ad;
-    --font-mono:  'Courier New', monospace;
+    color-scheme: dark;
+    /* Blender/Fusion neutral grey scale — shared with catalogue.html */
+    --grey-900:   #141414;
+    --grey-850:   #1d1d1d;
+    --grey-800:   #232323;
+    --grey-750:   #2b2b2b;
+    --grey-700:   #333333;
+    --grey-600:   #3d3d3d;
+    --grey-500:   #4a4a4a;
+
+    --bg:         var(--grey-850);
+    --surface:    var(--grey-800);
+    --raised:     var(--grey-750);
+    --well:       var(--grey-900);
+    --border:     #383838;
+    --line:       #2a2a2a;   /* 1px gutters between panels */
+
+    --accent:     #C9A84C;
+    --accent2:    #8FA98A;
+    --text:       #e4e4e4;
+    --muted:      #9a9a9a;
+    --faint:      #6f6f6f;
+    --danger:     #D4574A;
+    --warning:    #D9963F;
+    --success:    #6FA96F;
+    --info:       #7C93A6;
+    --crack:      #D4574A;
+    --stress:     #D9963F;
+    --salt:       #C9B45A;
+    --inscription:#9AA0A8;
+    --font-mono:  ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
     --font-main:  'Segoe UI', system-ui, sans-serif;
   }
 
@@ -41,46 +60,65 @@
   /* ── Layout ───────────────────────────────────────────────── */
   #app {
     display: grid;
-    grid-template-rows: 48px 1fr 180px;
-    grid-template-columns: 1fr;
+    grid-template-rows: 52px minmax(0, 1fr) clamp(196px, 25vh, 268px);
     height: 100vh;
-    gap: 0;
+    gap: 1px;
+    background: var(--line);
   }
 
   #header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 20px;
+    gap: 28px;
+    padding: 0 18px;
     background: var(--surface);
-    border-bottom: 1px solid var(--border);
     z-index: 10;
   }
 
-  #main {
+  /* Three rails so each panel gets the axis it actually needs: treatment
+     lists and the log are tall and scroll, the camera is wide, and the
+     attitude readout is horizontal. The old 180px bottom strip gave four
+     scrolling panels ~90px of height each, which none could use. */
+  #workspace {
     display: grid;
-    grid-template-columns: 1.4fr 1fr;
-    grid-template-rows: 1fr;
+    grid-template-columns: clamp(248px, 21vw, 336px) minmax(0, 1fr) clamp(288px, 26vw, 400px);
     gap: 1px;
-    background: var(--border);
+    background: var(--line);
     overflow: hidden;
   }
 
-  #bottom {
+  /* min-height:0 is load-bearing: without it these grid items size to
+     their content and overflow the clipped workspace, which silently
+     eats the bottom panel of each rail instead of shrinking anything. */
+  #rail-left,
+  #column-mid,
+  #rail-right {
     display: grid;
-    grid-template-columns: 1fr 1fr;
     gap: 1px;
-    background: var(--border);
-    border-top: 1px solid var(--border);
+    background: var(--line);
+    min-height: 0;
+    overflow: hidden;
+  }
+  #rail-left  { grid-template-rows: minmax(0, 1fr) clamp(180px, 26vh, 232px); }
+  #column-mid { grid-template-rows: minmax(0, 1.7fr) minmax(0, 1fr); }
+  #rail-right { grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr); }
+
+  #telemetry {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+    gap: 1px;
+    background: var(--line);
+    overflow: hidden;
   }
 
   /* ── Header ───────────────────────────────────────────────── */
   .logo {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 700;
     letter-spacing: 3px;
     color: var(--accent);
     text-transform: uppercase;
+    flex-shrink: 0;
   }
 
   .logo span { color: var(--text); font-weight: 300; }
@@ -92,25 +130,46 @@
     font-weight: 700;
     letter-spacing: 2px;
     text-transform: uppercase;
-    background: var(--surface);
-    border: 1px solid var(--muted);
+    background: var(--raised);
+    border: 1px solid var(--border);
     color: var(--muted);
     transition: all 0.3s;
+    flex-shrink: 0;
   }
 
-  #status-badge.scanning  { border-color: var(--accent);  color: var(--accent);  background: rgba(200,150,62,0.1); }
-  #status-badge.complete  { border-color: var(--success); color: #4caf7d;        background: rgba(46,125,82,0.1); }
-  #status-badge.error     { border-color: var(--danger);  color: #e57373;        background: rgba(192,57,43,0.1); }
+  #status-badge.scanning  { border-color: var(--accent);  color: var(--accent);  background: rgba(201,168,76,0.10); }
+  #status-badge.complete  { border-color: var(--success); color: var(--success); background: rgba(111,169,111,0.10); }
+  #status-badge.error     { border-color: var(--danger);  color: var(--danger);  background: rgba(212,87,74,0.10); }
 
   .header-stats {
     display: flex;
-    gap: 24px;
+    gap: 22px;
     align-items: center;
+    padding-left: 24px;
+    border-left: 1px solid var(--border);
+    height: 26px;
   }
 
-  .stat { text-align: center; }
-  .stat-value { font-size: 20px; font-weight: 700; color: var(--accent); line-height: 1; }
-  .stat-label { font-size: 9px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+  .stat { display: flex; align-items: baseline; gap: 7px; }
+  .stat-value { font-size: 17px; font-weight: 700; color: var(--text); font-family: var(--font-mono); line-height: 1; }
+  .stat-value.flag { color: var(--accent); }
+  .stat-label { font-size: 9px; color: var(--muted); letter-spacing: 1.4px; text-transform: uppercase; }
+
+  .header-spacer { flex: 1; }
+
+  .header-link {
+    font-size: 10px;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    text-decoration: none;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 5px 12px;
+    flex-shrink: 0;
+    transition: color .15s, border-color .15s;
+  }
+  .header-link:hover { color: var(--accent); border-color: var(--accent); }
 
   /* ── Panels ───────────────────────────────────────────────── */
   .panel {
@@ -118,13 +177,16 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
   }
 
   .panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 14px;
+    gap: 10px;
+    padding: 7px 12px;
+    background: var(--grey-850);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -135,23 +197,23 @@
     text-transform: uppercase;
     color: var(--muted);
     font-weight: 600;
+    white-space: nowrap;
   }
 
   .panel-body {
     flex: 1;
+    min-height: 0;   /* flex default is min-height:auto — content would win */
     overflow: hidden;
     position: relative;
   }
 
   /* ── Camera Feed ──────────────────────────────────────────── */
-  #camera-panel { grid-row: 1; grid-column: 1; }
-
   #camera-img {
     width: 100%;
     height: 100%;
     object-fit: contain;
     display: block;
-    background: #050608;
+    background: var(--well);
   }
 
   #camera-placeholder {
@@ -162,69 +224,68 @@
     align-items: center;
     justify-content: center;
     gap: 12px;
-    color: var(--muted);
+    color: var(--faint);
   }
 
   .cam-icon {
-    width: 48px;
-    height: 48px;
-    border: 2px solid var(--border);
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--border);
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 20px;
+    font-size: 18px;
   }
 
-  /* ── Sensing Grid ─────────────────────────────────────────── */
-  #sensing-panel { grid-row: 1; grid-column: 2; }
+  /* ── Sensing readouts ─────────────────────────────────────── */
+  /* Stacked rows rather than a 2x2 of oversized numbers: these are three
+     comparable 0-100% values, and a shared left edge makes them scannable
+     against each other in a way a quadrant grid does not. */
+  .sensing-list { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; }
 
-  .sensing-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-    gap: 1px;
-    background: var(--border);
-    height: 100%;
-  }
-
-  .sense-cell {
-    background: var(--surface);
+  .sense-row {
+    flex: 1 1 auto;
+    min-height: 60px;
     display: flex;
     flex-direction: column;
-    align-items: center;
     justify-content: center;
-    gap: 6px;
-    padding: 12px;
-    position: relative;
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--line);
     transition: background 0.4s;
   }
+  .sense-row.active { background: var(--raised); }
 
-  .sense-cell.active { background: #0d1017; }
+  .sense-row-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 7px;
+  }
 
   .sense-label {
-    font-size: 8px;
-    letter-spacing: 1.5px;
+    font-size: 9px;
+    letter-spacing: 1.4px;
     text-transform: uppercase;
     color: var(--muted);
   }
 
   .sense-value {
-    font-size: 28px;
+    font-size: 18px;
     font-weight: 700;
     line-height: 1;
     color: var(--text);
     font-family: var(--font-mono);
   }
 
-  .sense-value.low    { color: #4caf7d; }
+  .sense-value.low    { color: var(--success); }
   .sense-value.medium { color: var(--warning); }
   .sense-value.high   { color: var(--crack); }
 
   .sense-bar {
-    width: 80%;
+    width: 100%;
     height: 3px;
-    background: var(--border);
+    background: var(--grey-700);
     border-radius: 2px;
     overflow: hidden;
   }
@@ -236,23 +297,41 @@
     transition: width 0.6s ease;
   }
 
-  .sense-img {
-    width: 100%;
-    height: 60px;
-    object-fit: cover;
-    border-radius: 2px;
-    display: none;
+  /* Triage is a verdict, not another measurement — it sits apart, at the
+     foot of the stack, and is the only place a large numeral is used. */
+  .triage-row {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 13px;
+    background: var(--grey-850);
+    border-top: 1px solid var(--border);
   }
 
-  .sense-img.visible { display: block; }
-
-  /* ── Triage Score ─────────────────────────────────────────── */
   #triage-score {
-    font-size: 48px;
-    font-weight: 900;
+    font-size: 38px;
+    font-weight: 700;
     font-family: var(--font-mono);
-    color: var(--accent);
+    color: var(--faint);
     line-height: 1;
+    min-width: 62px;
+  }
+
+  #triage-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  #triage-sub {
+    font-size: 9px;
+    color: var(--faint);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-top: 3px;
   }
 
   /* ── Inscription Panel ────────────────────────────────────── */
@@ -262,22 +341,22 @@
   }
 
   .inscription-text {
-    font-size: 28px;
+    font-size: 23px;
     color: var(--accent);
     letter-spacing: 3px;
-    margin-bottom: 8px;
-    min-height: 40px;
+    margin-bottom: 6px;
+    min-height: 32px;
     font-family: 'Noto Serif Ethiopic', serif;
-    line-height: 1.4;
+    line-height: 1.35;
   }
 
   .inscription-translation {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text);
     font-style: italic;
-    opacity: 0.8;
-    margin-bottom: 16px;
-    min-height: 20px;
+    opacity: 0.75;
+    margin-bottom: 12px;
+    min-height: 18px;
   }
 
   .inscription-meta {
@@ -295,9 +374,9 @@
     text-transform: uppercase;
   }
 
-  .badge.known     { background: rgba(46,125,82,0.2);  border: 1px solid var(--success); color: #4caf7d; }
-  .badge.discovery { background: rgba(142,68,173,0.2); border: 1px solid var(--inscription); color: #c39bd3; animation: pulse 1s infinite; }
-  .badge.conf      { background: rgba(26,82,118,0.2);  border: 1px solid var(--info); color: #7fb3d3; }
+  .badge.known     { background: rgba(111,169,111,0.14); border: 1px solid var(--success); color: var(--success); }
+  .badge.discovery { background: rgba(201,168,76,0.14);  border: 1px solid var(--accent);  color: var(--accent); animation: pulse 1.4s infinite; }
+  .badge.conf      { background: rgba(124,147,166,0.14); border: 1px solid var(--info);    color: var(--info); }
 
   /* ── Treatment Protocol ───────────────────────────────────── */
   #treatment-panel {
@@ -341,7 +420,7 @@
     font-weight: 700;
   }
 
-  .treatment-section-title.safe   { color: #4caf7d; }
+  .treatment-section-title.safe   { color: var(--success); }
   .treatment-section-title.unsafe { color: var(--crack); }
 
   .treatment-item {
@@ -352,13 +431,13 @@
   }
 
   .treatment-item.safe {
-    background: rgba(46,125,82,0.08);
-    border-left: 3px solid #4caf7d;
+    background: rgba(111,169,111,0.07);
+    border-left: 2px solid var(--success);
   }
 
   .treatment-item.unsafe {
-    background: rgba(192,57,43,0.08);
-    border-left: 3px solid var(--crack);
+    background: rgba(212,87,74,0.07);
+    border-left: 2px solid var(--crack);
   }
 
   .treatment-name { font-weight: 600; color: var(--text); }
@@ -423,28 +502,28 @@
   .log-time { color: var(--muted); flex-shrink: 0; }
   .log-msg  { flex: 1; }
 
-  .log-entry.info    { color: var(--text); }
-  .log-entry.success { color: #4caf7d;  background: rgba(46,125,82,0.05); }
-  .log-entry.warning { color: #ffd180;  background: rgba(212,130,10,0.05); }
-  .log-entry.error   { color: #e57373;  background: rgba(192,57,43,0.08); }
+  .log-entry.info    { color: var(--muted); }
+  .log-entry.success { color: var(--success); background: rgba(111,169,111,0.06); }
+  .log-entry.warning { color: var(--warning); background: rgba(217,150,63,0.06); }
+  .log-entry.error   { color: var(--danger);  background: rgba(212,87,74,0.08); }
 
   /* ── Catalogue Strip ──────────────────────────────────────── */
   #catalogue-strip {
     display: flex;
     gap: 8px;
-    padding: 8px;
+    padding: 10px;
     overflow-x: auto;
-    align-items: center;
+    align-items: stretch;
     height: 100%;
   }
 
   .catalogue-card {
     flex-shrink: 0;
-    width: 100px;
-    background: var(--bg);
+    width: 128px;
+    background: var(--raised);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 8px;
+    padding: 9px;
     font-size: 9px;
     cursor: pointer;
     transition: border-color 0.2s;
@@ -453,8 +532,8 @@
 
   .catalogue-card:hover { border-color: var(--accent); }
 
-  .card-id    { color: var(--accent); font-weight: 700; margin-bottom: 4px; }
-  .card-class { color: var(--muted); margin-bottom: 3px; }
+  .card-id    { color: var(--accent); font-weight: 700; margin-bottom: 5px; font-family: var(--font-mono); }
+  .card-class { color: var(--muted); margin-bottom: 5px; text-transform: capitalize; }
   .card-score { font-family: var(--font-mono); }
   .card-score.high   { color: var(--crack); }
   .card-score.medium { color: var(--warning); }
@@ -464,7 +543,7 @@
   #resurrection-wall {
     position: fixed;
     inset: 0;
-    background: #020305;
+    background: var(--grey-900);
     display: none;
     flex-direction: column;
     align-items: center;
@@ -503,7 +582,7 @@
     color: var(--accent);
     font-family: 'Noto Serif Ethiopic', serif;
     letter-spacing: 4px;
-    text-shadow: 0 0 30px rgba(200,150,62,0.4);
+    text-shadow: 0 0 30px rgba(201,168,76,0.35);
   }
 
   .wall-translation {
@@ -517,7 +596,7 @@
     font-size: 9px;
     letter-spacing: 2px;
     text-transform: uppercase;
-    color: #3a3f4a;
+    color: var(--faint);
     margin-top: 2px;
   }
 
@@ -525,9 +604,148 @@
     position: absolute;
     bottom: 24px;
     font-size: 10px;
-    color: #2a2f3a;
+    color: var(--faint);
     letter-spacing: 2px;
     text-transform: uppercase;
+  }
+
+  /* ── Rover attitude (GY-80) ───────────────────────────────── */
+  .attitude-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    /* An explicit row is required, not just height:100%. With an implicit
+       auto row the cell has no definite height, so the silhouette's
+       intrinsic SVG size wins and the whole band overflows the viewport. */
+    grid-template-rows: minmax(0, 1fr);
+    gap: 1px;
+    background: var(--line);
+    height: 100%;
+  }
+
+  .att-view {
+    background: var(--surface);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: center;
+    padding: 10px 8px 12px;
+    gap: 6px;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .att-name {
+    font-size: 10px;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .att-stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  /* Reference geometry sits behind the silhouette and does NOT rotate —
+     that contrast is the whole readout: the rover turns, the world holds
+     still. Rotating both would show nothing. */
+  .att-horizon {
+    position: absolute;
+    left: 8%; right: 8%;
+    top: 50%;
+    height: 1px;
+    background: var(--grey-600);
+  }
+  .att-horizon::before,
+  .att-horizon::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    width: 1px; height: 7px;
+    background: var(--grey-600);
+  }
+  .att-horizon::before { left: 0; }
+  .att-horizon::after  { right: 0; }
+
+  .att-ring {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 82%;
+    aspect-ratio: 1;
+    transform: translate(-50%, -50%);
+    border: 1px dashed var(--grey-600);
+    border-radius: 50%;
+  }
+  .att-north {
+    position: absolute;
+    top: 2px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 8px;
+    letter-spacing: 1px;
+    color: var(--faint);
+  }
+
+  .att-figure {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* 90ms tracks a 10-20Hz socket feed without visible stepping; longer
+       reads as the rover lagging its own telemetry. */
+    transition: transform 90ms linear;
+    transform-origin: 50% 50%;
+  }
+  .att-figure > * { max-width: 90%; max-height: 90%; object-fit: contain; display: block; }
+  .att-view.stale .att-figure { opacity: 0.32; }
+
+  .att-angle {
+    font-family: var(--font-mono);
+    font-size: 21px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1;
+  }
+  .att-view.stale .att-angle { color: var(--faint); }
+
+  #imu-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .imu-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .imu-dot.live    { background: var(--success); animation: pulse 1.8s infinite; }
+  .imu-dot.drift   { background: var(--warning); }
+  .imu-dot.offline { background: var(--danger); }
+
+  /* ── Reconstruction preview ───────────────────────────────── */
+  #recon-body { position: relative; background: var(--grey-750); }
+  #recon-canvas { position: absolute; inset: 0; }
+  #recon-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
+  #recon-status {
+    position: absolute;
+    left: 10px; bottom: 8px;
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--faint);
+    pointer-events: none;
   }
 
   /* ── Animations ───────────────────────────────────────────── */
@@ -550,13 +768,9 @@
     from { opacity: 0; transform: translateY(20px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-
-  /* ── Bottom panels layout ─────────────────────────────────── */
-  #bottom-left  { display: grid; grid-template-rows: 1fr 1fr; gap: 1px; background: var(--border); }
-  #bottom-right { display: grid; grid-template-rows: 1fr 1fr; gap: 1px; background: var(--border); }
 </style>
 </head>
-<body>
+<body data-feature-mesh="{{ feature_mesh }}">
 
 <div id="app">
 
@@ -566,97 +780,108 @@
 
     <div class="header-stats">
       <div class="stat">
-        <div class="stat-value" id="stat-processed">0</div>
-        <div class="stat-label">Processed</div>
+        <span class="stat-value" id="stat-processed">0</span>
+        <span class="stat-label">Processed</span>
       </div>
       <div class="stat">
-        <div class="stat-value" id="stat-discoveries">0</div>
-        <div class="stat-label">Discoveries</div>
+        <span class="stat-value flag" id="stat-discoveries">0</span>
+        <span class="stat-label">Discoveries</span>
       </div>
       <div class="stat">
-        <div class="stat-value" id="stat-critical">0</div>
-        <div class="stat-label">Critical</div>
+        <span class="stat-value" id="stat-critical">0</span>
+        <span class="stat-label">Critical</span>
       </div>
     </div>
 
-    <a href="/catalogue" target="_blank"
-       style="font-size:10px;color:var(--accent);letter-spacing:1px;text-decoration:none;
-              text-transform:uppercase;margin-right:12px;">Catalogue 3D</a>
+    <div class="header-spacer"></div>
+    <a class="header-link" href="/catalogue" target="_blank">Catalogue 3D</a>
     <div id="status-badge">IDLE</div>
   </header>
 
-  <!-- ── Main Area ───────────────────────────────────────────── -->
-  <div id="main">
+  <!-- ── Workspace ───────────────────────────────────────────── -->
+  <div id="workspace">
 
-    <!-- Camera Feed -->
-    <div class="panel" id="camera-panel">
-      <div class="panel-header">
-        <span class="panel-title">Live Camera Feed</span>
-        <span id="cam-status" style="font-size:9px;color:var(--muted)">NO SIGNAL</span>
-      </div>
-      <div class="panel-body" style="background:#050608;">
-        <img id="camera-img" style="display:none;width:100%;height:100%;object-fit:contain;">
-        <div id="camera-placeholder">
-          <div class="cam-icon">◉</div>
-          <span style="font-size:10px;letter-spacing:2px;text-transform:uppercase;">Awaiting signal</span>
+    <!-- Left rail: sensing readouts + reconstruction preview -->
+    <div id="rail-left">
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Sensing Analysis</span>
+          <span id="artefact-id-display" style="font-size:9px;font-family:var(--font-mono);color:var(--accent)">—</span>
+        </div>
+        <div class="panel-body">
+          <div class="sensing-list">
+
+            <div class="sense-row" id="cell-crack">
+              <div class="sense-row-top">
+                <span class="sense-label">Crack Severity</span>
+                <span class="sense-value" id="val-crack">—</span>
+              </div>
+              <div class="sense-bar"><div class="sense-bar-fill" id="bar-crack" style="width:0%;background:var(--crack)"></div></div>
+            </div>
+
+            <div class="sense-row" id="cell-stress">
+              <div class="sense-row-top">
+                <span class="sense-label">Surface Stress</span>
+                <span class="sense-value" id="val-stress">—</span>
+              </div>
+              <div class="sense-bar"><div class="sense-bar-fill" id="bar-stress" style="width:0%;background:var(--stress)"></div></div>
+            </div>
+
+            <div class="sense-row" id="cell-salt">
+              <div class="sense-row-top">
+                <span class="sense-label">Salt Risk</span>
+                <span class="sense-value" id="val-salt">—</span>
+              </div>
+              <div class="sense-bar"><div class="sense-bar-fill" id="bar-salt" style="width:0%;background:var(--salt)"></div></div>
+            </div>
+
+            <div class="triage-row">
+              <div id="triage-score">—</div>
+              <div>
+                <div id="triage-label">Awaiting scan</div>
+                <div id="triage-sub">Weighted crack · stress · salt</div>
+              </div>
+            </div>
+
+          </div>
         </div>
       </div>
-    </div>
 
-    <!-- Sensing Outputs -->
-    <div class="panel" id="sensing-panel">
-      <div class="panel-header">
-        <span class="panel-title">Sensing Analysis</span>
-        <span id="artefact-id-display" style="font-size:9px;color:var(--accent)">—</span>
-      </div>
-      <div class="panel-body">
-        <div class="sensing-grid">
-
-          <!-- Crack -->
-          <div class="sense-cell" id="cell-crack">
-            <span class="sense-label">Crack Severity</span>
-            <span class="sense-value" id="val-crack">—</span>
-            <div class="sense-bar"><div class="sense-bar-fill" id="bar-crack" style="width:0%;background:var(--crack)"></div></div>
-          </div>
-
-          <!-- Stress -->
-          <div class="sense-cell" id="cell-stress">
-            <span class="sense-label">Surface Stress</span>
-            <span class="sense-value" id="val-stress">—</span>
-            <div class="sense-bar"><div class="sense-bar-fill" id="bar-stress" style="width:0%;background:var(--stress)"></div></div>
-          </div>
-
-          <!-- Salt -->
-          <div class="sense-cell" id="cell-salt">
-            <span class="sense-label">Salt Risk</span>
-            <span class="sense-value" id="val-salt">—</span>
-            <div class="sense-bar"><div class="sense-bar-fill" id="bar-salt" style="width:0%;background:var(--salt)"></div></div>
-          </div>
-
-          <!-- Triage Score -->
-          <div class="sense-cell" id="cell-triage">
-            <span class="sense-label">Triage Score</span>
-            <div id="triage-score">—</div>
-            <span id="triage-label" style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;">awaiting scan</span>
-          </div>
-
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Reconstruction</span>
+          <a class="header-link" style="padding:3px 8px" id="recon-open" href="/catalogue" target="_blank">Open</a>
+        </div>
+        <div class="panel-body" id="recon-body">
+          <div id="recon-canvas"></div>
+          <div id="recon-status">Loading mesh…</div>
         </div>
       </div>
-    </div>
 
-  </div><!-- end #main -->
+    </div><!-- end rail-left -->
 
-  <!-- ── Bottom Area ─────────────────────────────────────────── -->
-  <div id="bottom">
+    <!-- Centre: camera over inscription -->
+    <div id="column-mid">
 
-    <!-- Bottom Left: Inscription + Fragility -->
-    <div id="bottom-left">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Live Camera Feed</span>
+          <span id="cam-status" style="font-size:9px;letter-spacing:1px;color:var(--faint)">NO SIGNAL</span>
+        </div>
+        <div class="panel-body" style="background:var(--well);">
+          <img id="camera-img" style="display:none;">
+          <div id="camera-placeholder">
+            <div class="cam-icon">◉</div>
+            <span style="font-size:10px;letter-spacing:2px;text-transform:uppercase;">Awaiting signal</span>
+          </div>
+        </div>
+      </div>
 
-      <!-- Inscription -->
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Inscription</span>
-          <span id="inscription-conf" style="font-size:9px;color:var(--muted)"></span>
+          <span id="inscription-conf" style="font-size:9px;font-family:var(--font-mono);color:var(--muted)"></span>
         </div>
         <div class="panel-body" id="inscription-panel">
           <div class="inscription-text" id="inscription-text">—</div>
@@ -665,7 +890,11 @@
         </div>
       </div>
 
-      <!-- Treatment Protocol -->
+    </div><!-- end column-mid -->
+
+    <!-- Right rail: treatment protocol over mission log -->
+    <div id="rail-right">
+
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Treatment Protocol</span>
@@ -690,12 +919,6 @@
         </div>
       </div>
 
-    </div><!-- end bottom-left -->
-
-    <!-- Bottom Right: Log + Catalogue -->
-    <div id="bottom-right">
-
-      <!-- Mission Log -->
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Mission Log</span>
@@ -704,21 +927,70 @@
         <div class="panel-body" id="log-panel"></div>
       </div>
 
-      <!-- Catalogue Strip -->
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">Catalogue</span>
-        </div>
-        <div class="panel-body" style="overflow:hidden;">
-          <div id="catalogue-strip">
-            <span style="color:var(--muted);font-size:10px;margin:auto;">No artefacts processed yet</span>
-          </div>
+    </div><!-- end rail-right -->
+
+  </div><!-- end #workspace -->
+
+  <!-- ── Telemetry band ──────────────────────────────────────── -->
+  <div id="telemetry">
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Rover Attitude</span>
+        <div id="imu-meta">
+          <span id="imu-source">GY-80 · Mahony</span>
+          <span id="imu-rate">— Hz</span>
+          <span class="imu-dot offline" id="imu-dot"></span>
         </div>
       </div>
+      <div class="panel-body">
+        <div class="attitude-grid">
 
-    </div><!-- end bottom-right -->
+          <div class="att-view stale" id="att-roll">
+            <span class="att-name">Roll</span>
+            <div class="att-stage">
+              <div class="att-horizon"></div>
+              <div class="att-figure" id="fig-roll"></div>
+            </div>
+            <span class="att-angle" id="ang-roll">—</span>
+          </div>
 
-  </div><!-- end #bottom -->
+          <div class="att-view stale" id="att-pitch">
+            <span class="att-name">Pitch</span>
+            <div class="att-stage">
+              <div class="att-horizon"></div>
+              <div class="att-figure" id="fig-pitch"></div>
+            </div>
+            <span class="att-angle" id="ang-pitch">—</span>
+          </div>
+
+          <div class="att-view stale" id="att-yaw">
+            <span class="att-name">Yaw</span>
+            <div class="att-stage">
+              <div class="att-ring"></div>
+              <div class="att-north">N</div>
+              <div class="att-figure" id="fig-yaw"></div>
+            </div>
+            <span class="att-angle" id="ang-yaw">—</span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Catalogue</span>
+        <span id="catalogue-count" style="font-size:9px;color:var(--muted)">0 entries</span>
+      </div>
+      <div class="panel-body" style="overflow:hidden;">
+        <div id="catalogue-strip">
+          <span style="color:var(--faint);font-size:10px;margin:auto;">No artefacts processed yet</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end #telemetry -->
 
 </div><!-- end #app -->
 
@@ -882,6 +1154,8 @@ socket.on('catalogue_updated', (d) => {
   strip.scrollLeft = strip.scrollWidth;
 
   document.getElementById('stat-processed').textContent = d.total_complete;
+  document.getElementById('catalogue-count').textContent =
+    strip.querySelectorAll('.catalogue-card').length + ' entries';
 });
 
 socket.on('mission_complete', (d) => {
@@ -927,8 +1201,12 @@ function resetSensingCells() {
     document.getElementById('bar-' + id).style.width = '0%';
     document.getElementById('cell-' + id).classList.remove('active');
   });
-  document.getElementById('triage-score').textContent = '—';
-  document.getElementById('triage-label').textContent = 'awaiting scan';
+  const score = document.getElementById('triage-score');
+  score.textContent = '—';
+  score.style.color = 'var(--faint)';
+  const label = document.getElementById('triage-label');
+  label.textContent = 'Awaiting scan';
+  label.style.color = 'var(--muted)';
   document.getElementById('treatment-empty').style.display = 'block';
   document.getElementById('treatment-content').style.display = 'none';
   document.getElementById('fragility-years').textContent = '— yr';
@@ -942,14 +1220,227 @@ function updateTriageScore() {
   const salt   = parseFloat(document.getElementById('bar-salt').style.width)   || 0;
   const score  = Math.round((crack * 0.5 + stress * 0.3 + salt * 0.2));
 
+  const colour = score > 70 ? 'var(--crack)' : score > 40 ? 'var(--warning)' : 'var(--accent2)';
   const el = document.getElementById('triage-score');
   el.textContent = score;
-  el.style.color = score > 70 ? 'var(--crack)' : score > 40 ? 'var(--warning)' : 'var(--accent2)';
+  el.style.color = colour;
 
   const labels = ['STABLE','MONITOR','PRIORITY','CRITICAL'];
   const idx    = score > 70 ? 3 : score > 50 ? 2 : score > 25 ? 1 : 0;
-  document.getElementById('triage-label').textContent = labels[idx];
+  const label  = document.getElementById('triage-label');
+  label.textContent = labels[idx];
+  label.style.color = colour;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Rover attitude — GY-80 IMU via the attitude_update event
+// ═══════════════════════════════════════════════════════════════
+
+// Which orthographic view visualises which axis. Flip a sign if your
+// render faces the other way: the IMU convention is fixed by firmware,
+// the orientation you exported the silhouettes at is not.
+const ATT_VIEWS = {
+  roll:  { view: 'front', sign:  1 },
+  pitch: { view: 'side',  sign: -1 },
+  yaw:   { view: 'top',   sign:  1 },
+};
+
+// Used until real masked renders are dropped into static/rover/.
+const ROVER_FALLBACK_SVG = {
+  front: `<svg viewBox="0 0 200 120" width="200" height="120" fill="#3a3a3a" stroke="#8d8d8d" stroke-width="3" stroke-linejoin="round">
+    <rect x="16" y="52" width="34" height="50" rx="9" fill="#2b2b2b"/>
+    <rect x="150" y="52" width="34" height="50" rx="9" fill="#2b2b2b"/>
+    <path d="M50 76 H150" fill="none"/>
+    <rect x="52" y="34" width="96" height="34" rx="5"/>
+    <rect x="94" y="14" width="12" height="21"/>
+    <rect x="80" y="2" width="40" height="14" rx="3"/>
+  </svg>`,
+  side: `<svg viewBox="0 0 200 120" width="200" height="120" fill="#3a3a3a" stroke="#8d8d8d" stroke-width="3" stroke-linejoin="round">
+    <circle cx="46" cy="84" r="23" fill="#2b2b2b"/>
+    <circle cx="154" cy="84" r="23" fill="#2b2b2b"/>
+    <path d="M46 84 L100 64 L154 84" fill="none"/>
+    <rect x="34" y="44" width="132" height="26" rx="5"/>
+    <rect x="56" y="28" width="64" height="17" rx="3"/>
+    <path d="M150 44 L176 16 L192 30" fill="none"/>
+  </svg>`,
+  top: `<svg viewBox="0 0 160 160" width="160" height="160" fill="#3a3a3a" stroke="#8d8d8d" stroke-width="3" stroke-linejoin="round">
+    <rect x="18" y="34" width="26" height="30" rx="5" fill="#2b2b2b"/>
+    <rect x="116" y="34" width="26" height="30" rx="5" fill="#2b2b2b"/>
+    <rect x="18" y="96" width="26" height="30" rx="5" fill="#2b2b2b"/>
+    <rect x="116" y="96" width="26" height="30" rx="5" fill="#2b2b2b"/>
+    <rect x="46" y="26" width="68" height="108" rx="8"/>
+    <path d="M80 8 L91 26 L69 26 Z" fill="#8d8d8d" stroke="none"/>
+    <circle cx="80" cy="88" r="9" fill="#2b2b2b"/>
+  </svg>`,
+};
+
+let attitudeSeenAt = 0;
+
+async function initAttitudePanel() {
+  let views = {};
+  try {
+    const res = await fetch('/api/rover-views');
+    if (res.ok) views = (await res.json()).views || {};
+  } catch (e) { /* silhouettes are a fine fallback — don't block the panel */ }
+
+  Object.entries(ATT_VIEWS).forEach(([axis, cfg]) => {
+    const host = document.getElementById('fig-' + axis);
+    if (views[cfg.view]) {
+      const img = new Image();
+      img.src = views[cfg.view];
+      img.alt = cfg.view + ' view';
+      host.appendChild(img);
+    } else {
+      host.innerHTML = ROVER_FALLBACK_SVG[cfg.view];
+    }
+  });
+}
+
+function applyAttitude(d) {
+  attitudeSeenAt = Date.now();
+  document.getElementById('imu-rate').textContent =
+    d.filter_hz ? Math.round(d.filter_hz) + ' Hz' : '— Hz';
+
+  const dot = document.getElementById('imu-dot');
+
+  if (!d.is_valid) {
+    dot.className = 'imu-dot offline';
+    document.getElementById('imu-source').textContent = 'GY-80 · absent';
+    markAttitudeStale();
+    return;
+  }
+
+  dot.className = 'imu-dot ' + (d.gyro_biased ? 'live' : 'drift');
+  document.getElementById('imu-source').textContent =
+    d.gyro_biased ? 'GY-80 · Mahony' : 'GY-80 · uncalibrated';
+
+  Object.entries(ATT_VIEWS).forEach(([axis, cfg]) => {
+    const deg = d[axis] || 0;
+    document.getElementById('att-' + axis).classList.remove('stale');
+    document.getElementById('fig-' + axis).style.transform = `rotate(${deg * cfg.sign}deg)`;
+    document.getElementById('ang-' + axis).textContent = Math.round(deg) + '°';
+  });
+}
+
+function markAttitudeStale() {
+  ['roll','pitch','yaw'].forEach(axis => {
+    document.getElementById('att-' + axis).classList.add('stale');
+    document.getElementById('ang-' + axis).textContent = '—';
+  });
+}
+
+socket.on('attitude_update', applyAttitude);
+
+// A feed that stops has to look different from a feed reading zero,
+// otherwise a dead serial link renders as a perfectly level rover.
+setInterval(() => {
+  if (!attitudeSeenAt || Date.now() - attitudeSeenAt < 2500) return;
+  document.getElementById('imu-dot').className = 'imu-dot offline';
+  markAttitudeStale();
+}, 1000);
+
+// ═══════════════════════════════════════════════════════════════
+// Reconstruction preview — featured Meshroom output
+// ═══════════════════════════════════════════════════════════════
+
+const FEATURE_MESH = document.body.dataset.featureMesh || 'TEST-SCEAUX';
+let reconRenderer, reconScene, reconCamera, reconPivot;
+
+function initRecon() {
+  const mount = document.getElementById('recon-canvas');
+  const w = Math.max(mount.clientWidth, 1), h = Math.max(mount.clientHeight, 1);
+
+  reconScene = new THREE.Scene();
+  reconCamera = new THREE.PerspectiveCamera(42, w / h, 0.1, 100);
+  reconCamera.position.set(0, 0.5, 2.6);
+  reconCamera.lookAt(0, 0, 0);
+
+  reconRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  reconRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  reconRenderer.outputEncoding = THREE.sRGBEncoding;
+  reconRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+  reconRenderer.setClearColor(0x000000, 0);
+  reconRenderer.setSize(w, h, false);
+  mount.appendChild(reconRenderer.domElement);
+
+  reconScene.add(new THREE.HemisphereLight(0xf4f4f4, 0x1f1f1f, 0.40));
+  reconScene.add(new THREE.AmbientLight(0xffffff, 0.12));
+  const key = new THREE.DirectionalLight(0xffffff, 0.78);
+  key.position.set(3, 6, 5);
+  reconScene.add(key);
+  const rim = new THREE.DirectionalLight(0xd8d8d8, 0.24);
+  rim.position.set(-5, 1, -4);
+  reconScene.add(rim);
+
+  reconPivot = new THREE.Group();
+  reconScene.add(reconPivot);
+
+  new ResizeObserver(() => {
+    const rw = mount.clientWidth, rh = mount.clientHeight;
+    if (rw < 8 || rh < 8) return;
+    reconCamera.aspect = rw / rh;
+    reconCamera.updateProjectionMatrix();
+    reconRenderer.setSize(rw, rh, false);
+  }).observe(mount);
+
+  (function spin() {
+    requestAnimationFrame(spin);
+    reconPivot.rotation.y += 0.004;
+    reconRenderer.render(reconScene, reconCamera);
+  })();
+}
+
+async function loadReconMesh() {
+  const status = document.getElementById('recon-status');
+  document.getElementById('recon-open').href =
+    '/catalogue?preview=' + encodeURIComponent(FEATURE_MESH);
+
+  let entry;
+  try {
+    const res = await fetch('/api/mesh-preview/' + encodeURIComponent(FEATURE_MESH));
+    if (!res.ok) throw new Error(res.status);
+    entry = await res.json();
+  } catch (e) {
+    status.textContent = FEATURE_MESH + ' — no published mesh';
+    return;
+  }
+
+  const objUrl = entry.mesh_url;
+  if (!objUrl) { status.textContent = FEATURE_MESH + ' — no published mesh'; return; }
+  const base = objUrl.substring(0, objUrl.lastIndexOf('/') + 1);
+  const mtlFile = (entry.mesh_filename || 'model.obj').replace(/\.obj$/i, '.mtl');
+  const objLoader = new THREE.OBJLoader();
+
+  const place = (model) => {
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    model.position.sub(box.getCenter(new THREE.Vector3()));
+    model.scale.multiplyScalar(2.2 / Math.max(size.x, size.y, size.z, 1e-6));
+    reconPivot.add(model);
+    status.textContent = (entry.object_id || FEATURE_MESH) + ' · Meshroom';
+  };
+  const failed = () => { status.textContent = 'Mesh load failed'; };
+  const untextured = () => objLoader.load(objUrl, place, undefined, failed);
+
+  status.textContent = 'Loading ' + FEATURE_MESH + '…';
+
+  if (/\.glb$/i.test(entry.mesh_filename || '')) {
+    new THREE.GLTFLoader().load(objUrl, (gltf) => place(gltf.scene), undefined, failed);
+    return;
+  }
+
+  const mtlLoader = new THREE.MTLLoader();
+  mtlLoader.setPath(base);
+  mtlLoader.load(mtlFile, (materials) => {
+    materials.preload();
+    objLoader.setMaterials(materials);
+    objLoader.load(objUrl, place, undefined, failed);
+  }, undefined, untextured);
+}
+
+initAttitudePanel();
+initRecon();
+loadReconMesh();
 
 function addLog(message, level, timestamp) {
   const panel = document.getElementById('log-panel');

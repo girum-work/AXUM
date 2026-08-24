@@ -1,0 +1,20 @@
+[Unit]
+Description=AXUM Raspberry Pi Camera Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@AXUM_USER@
+Group=@AXUM_GROUP@
+WorkingDirectory=@AXUM_REPO@/pi/services
+EnvironmentFile=-/etc/default/axum-pi-camera
+ExecStart=@AXUM_VENV@/bin/python3 @AXUM_REPO@/pi/services/pi_camera_server.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

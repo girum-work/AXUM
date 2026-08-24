@@ -116,6 +116,11 @@ def parse_args() -> argparse.Namespace:
         choices=["cpu", "cuda"],
         help="Training device (use cuda on Colab GPU)",
     )
+    parser.add_argument("--encoder-checkpoint", type=Path, default=None)
+    parser.add_argument("--initial-model", type=Path, default=None)
+    parser.add_argument("--freeze-encoder-epochs", type=int, default=3)
+    parser.add_argument("--encoder-lr-scale", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -140,4 +145,9 @@ if __name__ == "__main__":
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
         device=args.device,
+        encoder_checkpoint=args.encoder_checkpoint,
+        initial_model=args.initial_model,
+        freeze_encoder_epochs=args.freeze_encoder_epochs,
+        encoder_lr_scale=args.encoder_lr_scale,
+        seed=args.seed,
     )
