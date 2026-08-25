@@ -214,13 +214,31 @@ class CrackDetector:
 
     @staticmethod
     def _score_severity(area_px: int, length_px: float, shape: tuple[int, int]) -> float:
-        """Compute normalized severity from crack area and length density."""
+        """
+        Compute normalized severity from crack area and length density.
+
+        Dividing total length by the diagonal assumed roughly one crack
+        spanning the frame. Real stone yields hundreds of contours, so the term
+        reached ~90x the diagonal, the sum clipped at 1.0 for every test image,
+        and is_treatable was constant False. Both terms are now squashed
+        through 1 - exp(-x/k), which keeps the score monotonic in damage and
+        bounded without a cliff.
+
+        The constants set how quickly the score approaches 1 and are NOT
+        calibrated against conservator judgement; CRACK_SEVERITY_THRESHOLD is
+        therefore not yet a defensible treat/flag boundary.
+        """
         height, width = shape
         image_area = max(1, height * width)
         diagonal = float(np.hypot(width, height))
-        area_density = area_px / image_area
+
+        area_fraction = area_px / image_area
         length_density = length_px / max(1.0, diagonal)
-        score = (area_density * 15.0) + (length_density * 0.35)
+
+        area_term = 1.0 - np.exp(-area_fraction / 0.02)
+        length_term = 1.0 - np.exp(-length_density / 12.0)
+
+        score = 0.6 * area_term + 0.4 * length_term
         return float(np.clip(score, 0.0, 1.0))
 
     @staticmethod
