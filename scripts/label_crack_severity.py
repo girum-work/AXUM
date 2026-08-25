@@ -8,8 +8,10 @@ has to say what "bad" looks like.
 
 Two modes:
 
-    label      show each image beside the detector's overlay and record a
-               1-5 severity rating. Resumable; already-rated images are skipped.
+    label      write a review panel per image (original beside the detector
+               overlay) and take a 1-5 rating from the terminal. Resumable;
+               already-rated images are skipped. No GUI window is used, because
+               requirements.txt pins opencv-python-headless.
 
     calibrate  compare stored ratings against detector scores. Reports rank
                correlation, the separation between treatable and not, and the
@@ -103,8 +105,13 @@ def build_panel(image: np.ndarray, overlay: np.ndarray,
     return np.vstack([panel, strip])
 
 
-def run_labelling(directories: list[Path]) -> int:
-    """Show each unlabelled image and record a keypress rating."""
+def run_labelling(directories: list[Path], panel_dir: Path) -> int:
+    """
+    Write review panels to disk, then take ratings from the terminal.
+
+    No cv2.imshow: requirements.txt pins opencv-python-headless, which has no
+    GUI at all. Writing files also means this works over SSH and on the Pi.
+    """
     images = find_images(directories)
     if not images:
         print(f"No images under {[str(d) for d in directories]}", file=sys.stderr)
@@ -118,45 +125,49 @@ def run_labelling(directories: list[Path]) -> int:
     if not pending:
         print("Nothing left to rate. Run with --calibrate.")
         return 0
-    print("Keys: 1-5 rate | s skip | u undo last | q quit and save\n")
 
-    order: list[str] = []
-    for index, path in enumerate(pending, 1):
+    panel_dir.mkdir(parents=True, exist_ok=True)
+    written: list[tuple[Path, Path, float, int]] = []
+    for path in pending:
         image = cv2.imread(str(path))
         if image is None:
             print(f"  unreadable, skipping: {path}")
             continue
-
         result = detector.detect(image)
-        caption = (f"[{index}/{len(pending)}] {path.name}   "
-                   f"detector: {result.severity_score:.3f}  "
-                   f"contours: {result.crack_count}")
-        cv2.imshow("crack severity", build_panel(image, result.overlay, caption))
+        panel_path = panel_dir / f"{path.stem}_review.jpg"
+        cv2.imwrite(str(panel_path),
+                    build_panel(image, result.overlay,
+                                f"{path.name}  detector {result.severity_score:.3f}  "
+                                f"contours {result.crack_count}"))
+        written.append((path, panel_path, result.severity_score, result.crack_count))
 
+    print(f"\nWrote {len(written)} review panels to {panel_dir}")
+    print("Open that folder in an image viewer, then rate each below.")
+    print("Original is on the left, detector overlay on the right.\n")
+    for line in SCALE_HELP:
+        print("  " + line)
+    print("  s skip | q quit and save\n")
+
+    for index, (path, panel_path, score, count) in enumerate(written, 1):
+        prompt = (f"[{index}/{len(written)}] {panel_path.name}  "
+                  f"(detector {score:.3f}, {count} contours) > ")
         while True:
-            key = cv2.waitKey(0) & 0xFF
-            if key in (ord("q"), 27):
-                cv2.destroyAllWindows()
+            try:
+                answer = input(prompt).strip().lower()
+            except EOFError:
+                answer = "q"
+            if answer in ("q", "quit"):
                 save_labels(labels)
                 print(f"\nSaved {len(labels)} ratings to {LABEL_PATH}")
                 return 0
-            if key == ord("s"):
+            if answer in ("s", ""):
                 break
-            if key == ord("u") and order:
-                removed = order.pop()
-                labels.pop(removed, None)
-                print(f"  undid {removed}")
-                break
-            if key in (ord(str(n)) for n in range(1, 6)):
-                rating = int(chr(key))
-                labels[str(path.as_posix())] = rating
-                order.append(str(path.as_posix()))
+            if answer in {"1", "2", "3", "4", "5"}:
+                labels[str(path.as_posix())] = int(answer)
                 save_labels(labels)
-                print(f"  {path.name}: rated {rating} "
-                      f"(detector {result.severity_score:.3f})")
                 break
+            print("  enter 1-5, s to skip, or q to quit")
 
-    cv2.destroyAllWindows()
     save_labels(labels)
     print(f"\nSaved {len(labels)} ratings to {LABEL_PATH}")
     return 0
@@ -263,6 +274,8 @@ def main() -> int:
                         help="Compare stored ratings against detector scores")
     parser.add_argument("--treatable-max", type=int, default=2,
                         help="Highest rating still considered treatable")
+    parser.add_argument("--panel-dir", type=Path, default=Path("data/crack_review"),
+                        help="Where review panels are written for viewing")
     args = parser.parse_args()
 
     if args.calibrate:
@@ -270,7 +283,7 @@ def main() -> int:
 
     directories = args.input_dir or [Path("data/crack_images"),
                                      Path("data/test_crack_detector")]
-    return run_labelling(directories)
+    return run_labelling(directories, args.panel_dir)
 
 
 if __name__ == "__main__":
