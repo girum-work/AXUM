@@ -187,6 +187,10 @@ def main() -> int:
                              "amounts of text; use this to compare languages.")
     parser.add_argument("--out", type=Path,
                         default=Path("models/restoration"))
+    parser.add_argument("--resume", action="store_true",
+                        help="Continue from the per-epoch checkpoint if one exists. "
+                             "Kaggle wipes /kaggle/working when a session restarts, "
+                             "so an uncommitted run is otherwise lost entirely.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -253,9 +257,37 @@ def main() -> int:
     loss_fn = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
     args.out.mkdir(parents=True, exist_ok=True)
+    resume_path = args.out / f"{args.language}_last.pth"
     best = 0.0
     history = []
-    for epoch in range(1, args.epochs + 1):
+    start_epoch = 1
+
+    if args.resume and resume_path.exists():
+        state = torch.load(resume_path, map_location=device, weights_only=False)
+        if state.get("vocab_fingerprint") != vocab.fingerprint():
+            print("Checkpoint vocabulary does not match this corpus; starting fresh.",
+                  file=sys.stderr)
+        else:
+            model.load_state_dict(state["state_dict"])
+            optimiser.load_state_dict(state["optimiser"])
+            # OneCycle bakes total_steps into its state, so restoring it after
+            # --epochs changed would overrun the schedule. Rebuild and
+            # fast-forward in that case.
+            expected_steps = args.epochs * max(len(train_loader), 1)
+            if state["scheduler"].get("total_steps") == expected_steps:
+                scheduler.load_state_dict(state["scheduler"])
+            else:
+                print(f"--epochs changed since the checkpoint; rebuilding schedule "
+                      f"for {args.epochs} epochs")
+                for _ in range(min(state["epoch"] * len(train_loader),
+                                   expected_steps - 1)):
+                    scheduler.step()
+            best = state["best"]
+            history = state["history"]
+            start_epoch = state["epoch"] + 1
+            print(f"resumed from epoch {state['epoch']} (best {best:.2%})")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         running = 0.0
         started = time.time()
@@ -289,6 +321,16 @@ def main() -> int:
             best = exact
             save_restoration_model(model, vocab,
                                    args.out / f"{args.language}_restoration.pth")
+
+        torch.save({
+            "state_dict": model.state_dict(),
+            "optimiser": optimiser.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": epoch,
+            "best": best,
+            "history": history,
+            "vocab_fingerprint": vocab.fingerprint(),
+        }, resume_path)
 
     log_path = Path("logs/restoration") / f"{args.language}_training.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
