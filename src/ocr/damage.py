@@ -394,7 +394,26 @@ def build_training_pair(
         (damaged tokens, targets) of equal length; None means do not score
     """
     if seed is not None:
-        random.seed(seed)
+        # Restore the caller's stream afterwards. Validation seeds every item,
+        # so without this the global RNG is left in a fixed state after each
+        # eval pass and training then replays identical damage every epoch --
+        # silently cancelling the per-epoch augmentation.
+        state = random.getstate()
+        try:
+            random.seed(seed)
+            return _build_training_pair(text, damage_rate, mode, gap_slots)
+        finally:
+            random.setstate(state)
+    return _build_training_pair(text, damage_rate, mode, gap_slots)
+
+
+def _build_training_pair(
+    text: str,
+    damage_rate: float | None,
+    mode: DamageMode | None,
+    gap_slots: int,
+) -> tuple[list[str], list[str | None]]:
+    """Damage generation proper; seeding is handled by the caller."""
     if damage_rate is None:
         damage_rate = random.uniform(0.0, 0.75)
     if mode is None:
