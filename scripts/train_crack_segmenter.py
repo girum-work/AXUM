@@ -70,25 +70,82 @@ def index_by_stem(directory: Path) -> dict[str, Path]:
 
 
 class CrackDataset(Dataset):
-    """Image/mask pairs resized to a fixed square, with light augmentation."""
+    """
+    Image/mask pairs at a fixed square size, with light augmentation.
+
+    Two sampling modes, because the datasets need different treatment.
+
+    Resizing suits MCS, whose cracks are ~22px wide. It ruins Stone331: its
+    centrelines are 1.9px, and downscaling 512 -> 256 with nearest neighbour
+    shatters one connected crack into ~29 fragments. Positive rate and width
+    survive the resize, connectivity does not, so the model is taught scattered
+    dots rather than a continuous curve.
+
+    Cropping keeps native pixel scale, so a crack stays connected, and doubles
+    as augmentation: 331 images yield far more distinct 256px views.
+    """
 
     def __init__(self, pairs: list[tuple[Path, Path]], size: int,
-                 augment: bool = False):
+                 augment: bool = False, crop: bool = False,
+                 min_positive: float = 0.0):
         self.pairs = pairs
         self.size = size
         self.augment = augment
+        self.crop = crop
+        self.min_positive = min_positive
 
     def __len__(self) -> int:
         return len(self.pairs)
+
+    def _random_crop(self, image: np.ndarray, mask: np.ndarray,
+                     attempts: int = 12) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Take a native-scale window, preferring one that contains crack.
+
+        Cracks cover ~0.1% of Stone331, so uniform crops are almost all
+        background and the model learns to answer "no crack" every time.
+        """
+        height, width = mask.shape[:2]
+        if height <= self.size or width <= self.size:
+            return image, mask
+
+        best = None
+        for _ in range(attempts):
+            y = random.randint(0, height - self.size)
+            x = random.randint(0, width - self.size)
+            mask_crop = mask[y:y + self.size, x:x + self.size]
+            positive = float((mask_crop > 0).mean())
+            if best is None or positive > best[0]:
+                best = (positive, y, x)
+            if positive >= self.min_positive:
+                break
+        _positive, y, x = best
+        return (image[y:y + self.size, x:x + self.size],
+                mask[y:y + self.size, x:x + self.size])
 
     def __getitem__(self, index: int):
         image_path, mask_path = self.pairs[index]
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
 
-        image = cv2.resize(image, (self.size, self.size), interpolation=cv2.INTER_AREA)
-        # Nearest keeps the mask binary; anything smoother invents grey edges.
-        mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
+        if self.crop:
+            # Match the image to the mask's own scale before cropping, so a
+            # crop is a true native-resolution window rather than a rescale.
+            if image.shape[:2] != mask.shape[:2]:
+                image = cv2.resize(image, (mask.shape[1], mask.shape[0]),
+                                   interpolation=cv2.INTER_AREA)
+            image, mask = self._random_crop(image, mask)
+            if image.shape[0] != self.size or image.shape[1] != self.size:
+                image = cv2.resize(image, (self.size, self.size),
+                                   interpolation=cv2.INTER_AREA)
+                mask = cv2.resize(mask, (self.size, self.size),
+                                  interpolation=cv2.INTER_NEAREST)
+        else:
+            image = cv2.resize(image, (self.size, self.size),
+                               interpolation=cv2.INTER_AREA)
+            # Nearest keeps the mask binary; anything smoother invents grey edges.
+            mask = cv2.resize(mask, (self.size, self.size),
+                              interpolation=cv2.INTER_NEAREST)
 
         if self.augment:
             if random.random() < 0.5:
@@ -176,6 +233,13 @@ def main() -> int:
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--pos-weight", type=float, default=0.0,
                         help="0 = derive from the data's own class balance")
+    parser.add_argument("--crop", action="store_true",
+                        help="Sample native-scale windows instead of rescaling. "
+                             "Required for Stone331: downscaling breaks its "
+                             "1.9px centrelines into disconnected fragments.")
+    parser.add_argument("--min-positive", type=float, default=0.0005,
+                        help="Crop sampler retries until a window holds at least "
+                             "this fraction of crack pixels")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--amp", action="store_true")
@@ -201,8 +265,10 @@ def main() -> int:
     val_stems, train_stems = shared[:split], shared[split:]
     to_pairs = lambda stems: [(images[s], masks[s]) for s in stems]
 
-    train_set = CrackDataset(to_pairs(train_stems), args.size, augment=True)
-    val_set = CrackDataset(to_pairs(val_stems), args.size, augment=False)
+    train_set = CrackDataset(to_pairs(train_stems), args.size, augment=True,
+                             crop=args.crop, min_positive=args.min_positive)
+    val_set = CrackDataset(to_pairs(val_stems), args.size, augment=False,
+                           crop=args.crop, min_positive=args.min_positive)
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, drop_last=len(train_set) > args.batch_size)
     val_loader = DataLoader(val_set, batch_size=args.batch_size,
@@ -211,13 +277,17 @@ def main() -> int:
     positive_rate = float(np.mean([
         float(train_set[i][1].mean()) for i in range(min(len(train_set), 60))
     ]))
-    # Positive rate differs ~48x between the two datasets, so the weight has to
-    # come from the data. The cap is high because Stone331's balanced weight is
-    # ~884; clamping that to 50 left BCE swamped by background and the model
-    # never left the all-negative solution.
+    # The textbook balanced weight, (1 - p) / p, is degenerate at these rates.
+    # Measured on Stone331 (p = 0.26%, balanced = 387), 6 epochs:
+    #     weight 387  P 0.020  R 0.923  F1 0.040   predicts crack everywhere
+    #     weight   1  P 0.000  R 0.000  F1 0.000   predicts nothing
+    #     weight  20  P 0.103  R 0.263  F1 0.148   beats OpenCV's 0.111
+    # 20 is sqrt(387), the geometric mean of the two failures, so the square
+    # root is the default. Dice already absorbs imbalance; a full balanced
+    # weight makes BCE fight it.
     balanced = (1 - positive_rate) / max(positive_rate, 1e-6)
     pos_weight = (torch.tensor([args.pos_weight]) if args.pos_weight > 0
-                  else torch.tensor([min(1000.0, max(1.0, balanced))]))
+                  else torch.tensor([max(1.0, balanced ** 0.5)]))
 
     device = torch.device(args.device)
     model = CrackUNet(SegmenterConfig(base_channels=args.base_channels)).to(device)
