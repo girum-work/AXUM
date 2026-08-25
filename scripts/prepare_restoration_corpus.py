@@ -118,10 +118,19 @@ def split_into_chunks(raw_text: str) -> list:
     return merged
 
 
-def prepare_corpus(input_dir: Path, output_path: Path) -> None:
+def prepare_corpus(input_dir: Path, output_path: Path,
+                   per_line: bool = False) -> None:
     """WHAT: processes every .txt file in input_dir into the final chunked JSON.
     WHY: single entry point, one file per known source, source name preserved
-    per-chunk for traceability in restoration output."""
+    per-chunk for traceability in restoration output.
+
+    per_line keeps one chunk per input line, bypassing the punctuation split.
+    Use it for verse-aligned corpora such as AGE, where a line is already the
+    unit of alignment. Splitting there silently destroys the alignment: Amharic
+    carries 51% more sentence punctuation than Ge'ez (23.3 vs 15.4 per 1k
+    chars), so the same 17.4k verses become 36.0k Amharic chunks against 18.2k
+    Ge'ez ones, halving Amharic's mean chunk length and doubling its optimiser
+    steps for the same text."""
     records = []
     txt_files = sorted(input_dir.glob("*.txt"))
     if not txt_files:
@@ -131,7 +140,10 @@ def prepare_corpus(input_dir: Path, output_path: Path) -> None:
     for txt_file in txt_files:
         source_name = txt_file.stem
         raw_text = txt_file.read_text(encoding="utf-8")
-        chunks = split_into_chunks(raw_text)
+        if per_line:
+            chunks = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        else:
+            chunks = split_into_chunks(raw_text)
         for i, chunk_text in enumerate(chunks):
             records.append({
                 "id": f"{source_name}_{i:04d}",
@@ -157,5 +169,9 @@ if __name__ == "__main__":
                          help="Directory of raw .txt source files (one per known text)")
     parser.add_argument("--output", type=Path, required=True,
                          help="Output path for chunked JSON corpus")
+    parser.add_argument("--per-line", action="store_true",
+                         help="One chunk per line, no punctuation split. Required "
+                              "for verse-aligned corpora such as AGE, where the "
+                              "line is the unit of alignment.")
     args = parser.parse_args()
-    prepare_corpus(args.input_dir, args.output)
+    prepare_corpus(args.input_dir, args.output, per_line=args.per_line)
