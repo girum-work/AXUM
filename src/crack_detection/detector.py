@@ -4,6 +4,18 @@ AXUM ROVER - Crack detection module.
 WHAT: Pure OpenCV crack extraction for stone, pottery, and inscription images.
 WHY: Crack detection must work locally on CPU and before any ML model is
 trained, so this module uses explainable image processing.
+
+MEASURED LIMITS (Stone331: 331 stone surfaces with pixel-level ground truth,
+via scripts/evaluate_crack_detector.py):
+
+    mask F1                        0.132
+    severity vs true crack extent  rank correlation +0.16
+
+DeepCrack's CNN reports roughly 0.85 F1 on the same data. This module is a CPU
+fallback, not a substitute. The mask is indicative and the severity score is
+close to uninformative for ranking damage, so no conservation decision should
+rest on it alone until it is replaced by a trained segmenter or calibrated
+against conservator judgement.
 """
 
 from __future__ import annotations
@@ -114,10 +126,10 @@ class CrackDetector:
         enhanced = self._enhance_contrast(gray)
         edges = self._edge_mask(enhanced)
         dark_lines = self._dark_line_mask(enhanced)
-        # Dark-line segmentation carries the crack body; Canny contributes
-        # crisp boundaries for very thin cracks. Requiring both can erase
-        # valid hairline cracks on low-contrast stone.
-        mask = cv2.bitwise_or(dark_lines, cv2.bitwise_and(edges, dark_lines))
+        # Dark-line segmentation carries the crack body; Canny reinstates thin
+        # cracks it misses. The previous OR(dark, AND(edges, dark)) reduces to
+        # dark_lines alone, so the edge pass had no effect at all.
+        mask = cv2.bitwise_or(dark_lines, cv2.bitwise_and(edges, self._dilate(dark_lines)))
         mask = self._clean_mask(mask)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -139,7 +151,11 @@ class CrackDetector:
 
             boxes.append((x, y, w, h))
             total_length += length
-            cv2.drawContours(crack_mask, [contour], -1, 255, thickness=cv2.FILLED)
+            # Keep the traced pixels, not the enclosed region: FILLED turned a
+            # crack that loops back on itself into a solid blob.
+            component = np.zeros_like(mask)
+            cv2.drawContours(component, [contour], -1, 255, thickness=cv2.FILLED)
+            crack_mask = cv2.bitwise_or(crack_mask, cv2.bitwise_and(component, mask))
 
         crack_area = int(np.count_nonzero(crack_mask))
         severity = self._score_severity(crack_area, total_length, gray.shape)
@@ -191,17 +207,40 @@ class CrackDetector:
         return cv2.dilate(edges, kernel, iterations=1)
 
     @staticmethod
-    def _dark_line_mask(gray: np.ndarray) -> np.ndarray:
-        """Segment dark linework while adapting to uneven stone lighting."""
+    def _dark_line_mask(gray: np.ndarray, keep_percent: float = 2.0) -> np.ndarray:
+        """
+        Segment dark linework while adapting to uneven stone lighting.
+
+        Thresholding the blackhat response with Otsu marked ~53% of every
+        Stone331 image against a ground truth of 0.1%. Otsu assumes a bimodal
+        histogram with substantial mass in both modes; when the target is a
+        fraction of a percent of pixels it simply splits the background.
+        A high percentile keeps the strongest responses instead, so the amount
+        retained is bounded by construction.
+
+        keep_percent = 2.0 is the empirical best on Stone331 (F1 0.132);
+        1.0 trades recall for precision, 4.0 and above collapses precision.
+
+        Args:
+            gray: Contrast-enhanced grayscale image
+            keep_percent: Percentage of pixels to retain as candidate crack
+
+        Returns:
+            Binary mask
+        """
         blackhat_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
         blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, blackhat_kernel)
-        _threshold, mask = cv2.threshold(
-            blackhat,
-            0,
-            255,
-            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-        )
+        cutoff = float(np.percentile(blackhat, 100.0 - keep_percent))
+        _threshold, mask = cv2.threshold(blackhat, max(cutoff, 1.0), 255,
+                                         cv2.THRESH_BINARY)
         return mask
+
+    @staticmethod
+    def _dilate(mask: np.ndarray, radius: int = 2) -> np.ndarray:
+        """Widen a mask so a neighbouring edge pixel still counts as adjacent."""
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                           (2 * radius + 1, 2 * radius + 1))
+        return cv2.dilate(mask, kernel)
 
     @staticmethod
     def _clean_mask(mask: np.ndarray) -> np.ndarray:
