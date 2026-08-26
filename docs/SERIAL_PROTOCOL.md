@@ -25,8 +25,9 @@
 |---|---|---|
 | `POSE:<name>` | `OK:POSE` | Named poses: `PARK`, `HOVER_TRAY`, `GRIP_TRAY`, `LIFT_CLEAR`, `HOVER_TABLE`, `PLACE_TABLE`, `LIFT_TABLE`. Foundation of `ArmController.go_pose()`, `pick_from_tray()`, `place_on_turntable()`, `park()`. |
 | `ARM:<s0>,<s1>,<s2>,<s3>` | `OK:ARM` | All four joints, one call, degrees. |
-| `GRIP:PULL` | `OK:GRIP:PULL` | Syringe actuator, calibrated pull position. Replaces the earlier `GRIP:<angle>` servo-claw command and the never-implemented `VACUUM:ON/OFF`. |
-| `GRIP:RELEASE` | `OK:GRIP:RELEASE` | Syringe actuator, calibrated release position. |
+| `GRIP:PULL` | `OK:GRIP` or `ERR:GRIP_NOT_HOMED_SEND_RELEASE_FIRST` | Stepper-driven syringe gripper (DRV8825, pins 33/34/35). Replaces the earlier `GRIP:<angle>` servo-claw command and the never-implemented `VACUUM:ON/OFF`. **Refuses until homed:** a stepper has no absolute position, and pulling from an unknown one can bottom the plunger against the barrel. Send `GRIP:RELEASE` once after power-up first. Response was previously documented as `OK:GRIP:PULL`; the firmware has always returned `OK:GRIP`. |
+| `GRIP:RELEASE` | `OK:GRIP` | Releases, and doubles as the homing move — drives full travel toward the released end, the safe direction to overshoot, and resets the step reference. Response was previously documented as `OK:GRIP:RELEASE`; firmware returns `OK:GRIP`. |
+| `GRIP:STEP:<n>` | `OK:GRIP:STEP:<position>` | Raw signed step move for calibration; replies with the new tracked position. Rejects moves beyond 4000 steps. |
 | `CAMERA_TILT:<deg>` | `OK:CAMERA_TILT` | Rear/tail camera arm's tilt joint. Lives on `ArmController` (`camera_tilt()`), not `TurntableController` — this is the CTO's 2-DOF tail-arm ruling, unrelated to the navigation/turntable design. |
 
 **Grip confidence — known gap, not yet closed:** nothing above reports whether a grip actually succeeded. `mission_tree.py`'s `PICK` phase currently uses a fabricated placeholder (`0.75`), which is why wiring the mission tree into `main_pipeline.py`'s default execution path is still held. `STATUS`'s `loadcell_raw` field is a real candidate for closing this gap if the load cell is physically positioned to sense grip weight — unconfirmed, not wired in yet.
@@ -70,7 +71,8 @@ The GY-80 supersedes the MPU6050 listed as unconfirmed in the firmware's integra
 
 | Command | Response | Notes |
 |---|---|---|
-| `INJECT:<...>` | `NACK:INJECT:MECHANISM_UNDECIDED` | **Deliberately not implemented.** Actuator mechanism (servo / stepper / DC motor) is an open Mechanical Engineer decision — the command's real shape depends entirely on which one is chosen. Do not implement against a guess. |
+| `INJECT:<µl>` | `NACK:INJECT:UNCALIBRATED_USE_INJECT_STEP` | **Still not implemented, but no longer blocked on the mechanism.** The actuator decision is made: stepper on a DRV8825 (pins 36/37/38). What is missing is a measured steps-per-µL, and guessing it would dispense an unknown quantity of consolidant onto a real artefact. |
+| `INJECT:STEP:<n>` | `OK:INJECT:STEP:<n>` | Raw signed step move, for calibration only. Command a known count, read the travel off the syringe's printed markings, repeat at two or three points to confirm linearity. That yields steps-per-µL without needing the lead screw's rated pitch. Rejects moves beyond 4000 steps. |
 
 ## Cameras (not on this serial link)
 
@@ -87,6 +89,7 @@ The GY-80 supersedes the MPU6050 listed as unconfirmed in the firmware's integra
 - `CAM_ARM_TRIGGER` exists in firmware and now on `ArduinoSerial.cam_arm_trigger()`, but nothing in `main_pipeline.py`/`mission_tree.py` calls it yet.
 - `ir_1`/`ir_2`/`ir_3` purpose unconfirmed.
 - `loadcell_raw` as a real grip-confidence source: unconfirmed whether the load cell is physically positioned for this.
-- `INJECT` blocked on Mechanical's actuator decision.
+- `INJECT` blocked on a measured steps-per-µL figure, not on the mechanism — use `INJECT:STEP:<n>` to obtain it.
+- Neither syringe axis is calibrated. `GRIP_TRAVEL_STEPS` in firmware is a placeholder that deliberately errs short, and there are no limit switches on either axis.
 - Wheel-stall detection has no sensor to check against; either remove the dead code path or find a replacement sensing source.
 - **Added by Systems Integration Engineer, this pass:** `mission_tree.py`'s `_make_action_analyze` had three real bugs against the actual analysis-module signatures (wrong function names/kwargs for photometric stereo and multispectral, and a `stress_score` field that doesn't exist on `MultispectralResult`) — fixed, but the fix for multispectral's `visible`/`ir` mapping against the blackboard's `uv_path`/`nir_path` keys is a best guess, not confirmed, and depends on `_scan_artefact()` — which doesn't exist in `main_pipeline.py` yet — to actually define what gets saved under each key. `_ensure_hardware()` is also referenced but doesn't exist yet. Neither invented here; `run_artefact_mission()` stays unwired from `main_pipeline.py`'s default path until both exist and the mapping is confirmed.

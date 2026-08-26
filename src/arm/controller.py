@@ -467,17 +467,27 @@ class ArmController:
 
     def grip_pull(self) -> str:
         """
-        Engage the syringe-actuated vacuum gripper (pull = grip).
+        Engage the syringe gripper (pull = grip).
 
-        Matches firmware's GRIP:PULL command. The old numeric GRIP:<angle>
-        protocol is retired in firmware as of this integration pass — this
-        method (not set_grip) is the only supported way to close the
-        gripper now.
+        Matches firmware's GRIP:PULL. The old numeric GRIP:<angle> protocol is
+        retired -- this method, not set_grip, is the only supported way to
+        close the gripper.
+
+        The gripper is a stepper now, so it has no absolute position and
+        firmware refuses to pull until GRIP:RELEASE has established a
+        reference, answering ERR:GRIP_NOT_HOMED_SEND_RELEASE_FIRST. Call
+        grip_release() once after power-up, or use pick_from_tray() which does.
         """
         return self.arduino.send_command("GRIP:PULL", expect_prefix="OK:")
 
     def grip_release(self) -> str:
-        """Release the syringe-actuated vacuum gripper. Matches GRIP:RELEASE."""
+        """
+        Release the syringe gripper. Matches GRIP:RELEASE.
+
+        Doubles as the homing move: it drives the full travel toward the
+        released end, which is the safe direction to overshoot, and resets the
+        firmware's step reference.
+        """
         return self.arduino.send_command("GRIP:RELEASE", expect_prefix="OK:")
 
     def camera_tilt(self, angle: int) -> str:
@@ -491,6 +501,9 @@ class ArmController:
         """Run the standard tray pick sequence used by the demo mission."""
         self.go_pose("HOVER_TRAY")
         self.go_pose("GRIP_TRAY")
+        # Homes the stepper gripper: firmware rejects a pull from an unknown
+        # position, and after power-up every position is unknown.
+        self.grip_release()
         self.grip_pull()
         self.go_pose("LIFT_CLEAR")
 
