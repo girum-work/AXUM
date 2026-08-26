@@ -1,0 +1,35 @@
+{
+  "language": "amharic",
+  "domain": "verse_o5",
+  "corpus": "data\\restoration_corpus_amharic_verse.json",
+  "generated_utc": "2026-08-25T23:15:23+00:00",
+  "ngram_order": 5,
+  "damage_rate": 0.25,
+  "seed": 42,
+  "points": [
+    {
+      "language": "amharic",
+      "domain": "verse_o5",
+      "train_phrases": 14000,
+      "train_chars": 1059288,
+      "eval_phrases": 361,
+      "slots": 5702,
+      "top1_accuracy": 0.2627,
+      "top3_accuracy": 0.3958,
+      "perplexity": 87.87,
+      "unique_fidels": 268
+    },
+    {
+      "language": "amharic",
+      "domain": "verse_o5",
+      "train_phrases": 17012,
+      "train_chars": 1289896,
+      "eval_phrases": 361,
+      "slots": 5702,
+      "top1_accuracy": 0.2648,
+      "top3_accuracy": 0.4025,
+      "perplexity": 85.13,
+      "unique_fidels": 270
+    }
+  ]
+}
