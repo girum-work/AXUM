@@ -230,19 +230,39 @@ class ArduinoSerial:
             logger.warning(f"Could not parse Arduino GPS_STATUS: {response!r}")
             return GPSFix(has_fix=False)
 
+        def _optional(key, cast):
+            value = payload.get(key)
+            if value is None:
+                return None
+            try:
+                return cast(value)
+            except (TypeError, ValueError):
+                return None
+
+        # Parsed before the fix check: satellites and HDOP are exactly what
+        # tell an enclosed space apart from open sky still acquiring, so
+        # returning early on no-fix would discard the useful part.
+        satellites = _optional("sats", int)
+        age_ms = _optional("age_ms", int)
+        hdop = _optional("hdop", float)
+
         if not payload.get("fix"):
-            return GPSFix(has_fix=False)
+            return GPSFix(has_fix=False, satellites=satellites,
+                          age_ms=age_ms, hdop=hdop)
 
         try:
             return GPSFix(
                 has_fix=True,
                 latitude=float(payload["lat"]),
                 longitude=float(payload["lon"]),
-                satellites=int(payload["sats"]),
+                satellites=satellites,
+                age_ms=age_ms,
+                hdop=hdop,
             )
         except (KeyError, TypeError, ValueError):
             logger.warning(f"Could not parse Arduino GPS_STATUS fields: {response!r}")
-            return GPSFix(has_fix=False)
+            return GPSFix(has_fix=False, satellites=satellites,
+                          age_ms=age_ms, hdop=hdop)
 
     def cam_arm_trigger(self) -> str:
         """
@@ -348,14 +368,52 @@ class GPSFix:
         has_fix: Whether the module currently reports a valid position.
         latitude: Decimal degrees, None if has_fix is False.
         longitude: Decimal degrees, None if has_fix is False.
-        satellites: Satellite count contributing to the fix, None if
-            has_fix is False.
+        satellites: Satellites currently tracked. Reported even without a fix,
+            because that is when it matters: 0-2 means enclosed, 6+ means open
+            sky and still acquiring.
+        age_ms: Milliseconds since the position last updated, None if never
+            fixed. A receiver keeps reporting its last position long after
+            losing the sky, so has_fix alone does not mean "currently outside".
+        hdop: Horizontal dilution of precision. Lower is better; above ~5 the
+            fix is too loose to navigate on.
     """
 
     has_fix: bool
     latitude: float | None = None
     longitude: float | None = None
     satellites: int | None = None
+    age_ms: int | None = None
+    hdop: float | None = None
+
+    def is_open_sky(self, min_satellites: int = 6, max_age_ms: int = 2000,
+                    max_hdop: float = 5.0) -> bool:
+        """
+        Whether this reading is consistent with being outdoors.
+
+        Deliberately not a mode switch. Mission phase decides which navigator
+        runs; this decides whether the outdoor one is allowed to trust its
+        input. Flipping navigation mode automatically mid-manoeuvre because the
+        rover passed a window is a hazard, not a feature.
+
+        Callers should require several consecutive agreeing readings before
+        acting, since a single sample flips easily near a doorway.
+
+        Args:
+            min_satellites: Below this, treat as enclosed
+            max_age_ms: Older than this and the fix is stale, not live
+            max_hdop: Above this the geometry is too poor to rely on
+
+        Returns:
+            True only if every available indicator agrees
+        """
+        if not self.has_fix or self.satellites is None:
+            return False
+        if self.satellites < min_satellites:
+            return False
+        if self.age_ms is None or self.age_ms > max_age_ms:
+            return False
+        # A missing HDOP is not evidence of a good fix, so treat it as failing.
+        return self.hdop is not None and self.hdop <= max_hdop
 
 
 class ArmController:
