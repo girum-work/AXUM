@@ -827,14 +827,33 @@ void processCommand(String cmd) {
   // Reports whatever TinyGPS++'s internal state currently holds -- parsed
   // continuously in the background (see loop()). Does not read Serial3
   // directly here, and Serial3 bytes are never echoed to Serial.
+  //
+  // sats, age and hdop are reported whether or not there is a fix, which the
+  // earlier version did not do: it nested sats inside the valid-fix branch, so
+  // a caller asking "am I outdoors?" got {"fix":false} and nothing else. That
+  // is the one moment the satellite count matters, because it separates
+  // indoors (0-2 sats, no fix) from outdoors still acquiring (6+ sats, no fix
+  // yet). age matters for the same reason: a receiver keeps reporting its last
+  // position for a long time after losing the sky, so fix==true on its own
+  // does not mean the rover is currently outside.
   if (cmd == "GPS_STATUS") {
     Serial.print("{\"fix\":");
     Serial.print(gps.location.isValid() ? "true" : "false");
     if (gps.location.isValid()) {
       Serial.print(",\"lat\":");  Serial.print(gps.location.lat(), 6);
       Serial.print(",\"lon\":");  Serial.print(gps.location.lng(), 6);
-      Serial.print(",\"sats\":"); Serial.print(gps.satellites.value());
     }
+    Serial.print(",\"sats\":");
+    if (gps.satellites.isValid()) Serial.print(gps.satellites.value());
+    else                          Serial.print(0);
+    Serial.print(",\"age_ms\":");
+    // age() returns ULONG_MAX when nothing has ever been received; null keeps
+    // the caller from reading that as a real 49-day-old fix.
+    if (gps.location.isValid()) Serial.print(gps.location.age());
+    else                        Serial.print("null");
+    Serial.print(",\"hdop\":");
+    if (gps.hdop.isValid()) Serial.print(gps.hdop.hdop(), 2);
+    else                    Serial.print("null");
     Serial.println("}");
     return;
   }
