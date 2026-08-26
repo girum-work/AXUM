@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -105,7 +106,67 @@ def build_panel(image: np.ndarray, overlay: np.ndarray,
     return np.vstack([panel, strip])
 
 
-def run_labelling(directories: list[Path], panel_dir: Path) -> int:
+def stratified_sample(images: list[Path], detector: CrackDetector, count: int,
+                      bin_count: int = 6, scan_limit: int = 400) -> list[Path]:
+    """
+    Pick images spread across the detector's severity range.
+
+    Random sampling wastes ratings: artefact photos cluster heavily in one band,
+    so 30 random images can only locate the threshold inside that band. Spanning
+    the range puts each rating where it carries information about the boundary.
+
+    Args:
+        images: Candidate paths
+        detector: Used only to spread the sample, never as ground truth
+        count: How many images to return
+        bin_count: Severity bands to spread across
+        scan_limit: Cap on images scored, to keep selection quick
+
+    Returns:
+        Selected paths, ordered from least to most severe
+    """
+    candidates = images if len(images) <= scan_limit else random.sample(images, scan_limit)
+
+    scored: list[tuple[float, Path]] = []
+    for path in candidates:
+        image = cv2.imread(str(path))
+        if image is None:
+            continue
+        # Large museum photographs are slow and the score is scale-sensitive.
+        if max(image.shape[:2]) > 1200:
+            scale = 1200 / max(image.shape[:2])
+            image = cv2.resize(image, (int(image.shape[1] * scale),
+                                       int(image.shape[0] * scale)))
+        scored.append((detector.detect(image).severity_score, path))
+
+    if not scored:
+        return []
+
+    buckets: dict[int, list[tuple[float, Path]]] = {}
+    for score, path in scored:
+        index = min(bin_count - 1, int(score * bin_count))
+        buckets.setdefault(index, []).append((score, path))
+
+    selected: list[tuple[float, Path]] = []
+    per_bin = max(1, count // max(len(buckets), 1))
+    for index in sorted(buckets):
+        pool = buckets[index]
+        random.shuffle(pool)
+        selected.extend(pool[:per_bin])
+
+    # Top up from whatever is left if some bands were sparse.
+    if len(selected) < count:
+        chosen = {p for _, p in selected}
+        remaining = [(s, p) for s, p in scored if p not in chosen]
+        random.shuffle(remaining)
+        selected.extend(remaining[:count - len(selected)])
+
+    selected.sort(key=lambda item: item[0])
+    return [path for _score, path in selected[:count]]
+
+
+def run_labelling(directories: list[Path], panel_dir: Path,
+                  stratified: int = 0) -> int:
     """
     Write review panels to disk, then take ratings from the terminal.
 
@@ -125,6 +186,11 @@ def run_labelling(directories: list[Path], panel_dir: Path) -> int:
     if not pending:
         print("Nothing left to rate. Run with --calibrate.")
         return 0
+
+    if stratified:
+        print(f"Selecting {stratified} images spread across the severity range...")
+        pending = stratified_sample(pending, detector, stratified)
+        print(f"  selected {len(pending)}")
 
     panel_dir.mkdir(parents=True, exist_ok=True)
     written: list[tuple[Path, Path, float, int]] = []
@@ -276,6 +342,9 @@ def main() -> int:
                         help="Highest rating still considered treatable")
     parser.add_argument("--panel-dir", type=Path, default=Path("data/crack_review"),
                         help="Where review panels are written for viewing")
+    parser.add_argument("--stratified", type=int, default=0,
+                        help="Select this many images spread across the detector's "
+                             "severity range instead of taking all of them")
     args = parser.parse_args()
 
     if args.calibrate:
@@ -283,7 +352,7 @@ def main() -> int:
 
     directories = args.input_dir or [Path("data/crack_images"),
                                      Path("data/test_crack_detector")]
-    return run_labelling(directories, args.panel_dir)
+    return run_labelling(directories, args.panel_dir, stratified=args.stratified)
 
 
 if __name__ == "__main__":
