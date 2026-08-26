@@ -1,0 +1,35 @@
+{
+  "language": "geez",
+  "domain": "verse_o5",
+  "corpus": "data\\restoration_corpus_geez_verse.json",
+  "generated_utc": "2026-08-25T23:15:13+00:00",
+  "ngram_order": 5,
+  "damage_rate": 0.25,
+  "seed": 42,
+  "points": [
+    {
+      "language": "geez",
+      "domain": "verse_o5",
+      "train_phrases": 14000,
+      "train_chars": 940251,
+      "eval_phrases": 395,
+      "slots": 5209,
+      "top1_accuracy": 0.2584,
+      "top3_accuracy": 0.397,
+      "perplexity": 89.54,
+      "unique_fidels": 263
+    },
+    {
+      "language": "geez",
+      "domain": "verse_o5",
+      "train_phrases": 17109,
+      "train_chars": 1151360,
+      "eval_phrases": 395,
+      "slots": 5209,
+      "top1_accuracy": 0.2572,
+      "top3_accuracy": 0.4001,
+      "perplexity": 87.19,
+      "unique_fidels": 265
+    }
+  ]
+}
