@@ -17,8 +17,10 @@
  * Command reference:
  *   DRIVE:<left_speed>,<right_speed>   speed: -255 to 255 (UNCHANGED shape)
  *   ARM:<s0>,<s1>,<s2>,<s3>            angles: 0 to 180 degrees (UNCHANGED)
- *   GRIP:PULL                          syringe-actuated vacuum grip: engage
- *   GRIP:RELEASE                       syringe-actuated vacuum grip: release
+ *   GRIP:PULL                          syringe gripper: engage (needs homing)
+ *   GRIP:RELEASE                       syringe gripper: release + set home
+ *   GRIP:STEP:<n>                      raw signed step move, for calibration
+ *   INJECT:STEP:<n>                    raw signed step move, for calibration
  *   STEP:<steps>                        turntable steps (+ = CW) (UNCHANGED)
  *   ROTATE:<degrees>                    turntable rotation (UNCHANGED)
  *   CAMERA_TILT:<deg>                   rear-arm camera tilt servo, 0-180
@@ -66,12 +68,22 @@
  *    integration question rather than guessing at wiring that could be
  *    physically wrong.
  *
- * 4. GRIP_PULL_ANGLE / GRIP_RELEASE_ANGLE below are PROVISIONAL. Mechanical
- *    has not supplied final crank throw/force numbers for the syringe
- *    linkage. Values chosen to match the existing pick/place pose
- *    convention already used elsewhere in this file (90 = grip-closed
- *    posture, 160 = open posture) purely for continuity — verify against
- *    the real mechanism before trusting these on hardware.
+ * 4. GRIPPER IS NO LONGER A SERVO. It is a stepper-driven syringe on a
+ *    DRV8825 (pins 33/34/35); the consolidant syringe is a second DRV8825
+ *    (36/37/38). Pin 10 is now free. GRIP:PULL / GRIP:RELEASE keep their
+ *    exact names and response shape, so nothing on the Python side changed.
+ *
+ *    GRIP_TRAVEL_STEPS is UNCALIBRATED and deliberately errs short. A stepper
+ *    has no absolute position, so:
+ *      - the gripper is NOT driven at boot; position is unknown until
+ *        GRIP:RELEASE establishes the reference,
+ *      - GRIP:PULL refuses to run before that, since pulling from an unknown
+ *        position can bottom the plunger against the barrel,
+ *      - GRIP:RELEASE always drives full travel toward the released end,
+ *        which is the safe direction to overshoot.
+ *    Calibrate with GRIP:STEP:<n> / INJECT:STEP:<n>: command a known count,
+ *    read travel off the syringe markings, repeat at two or three points.
+ *    INJECT:<uL> stays refused until steps-per-uL is measured.
  *
  * 5. New library dependencies, this pass: PCA9685 LED driving requires
  *    Adafruit_PWMServoDriver (+ Adafruit_BusIO). GPS requires TinyGPS++
@@ -191,7 +203,22 @@ const int PIN_S0 = 3;    // Base rotation (MG996R)
 const int PIN_S1 = 4;    // Shoulder       (MG996R)
 const int PIN_S2 = 6;    // Elbow          (MG90S)
 const int PIN_S3 = 9;    // Wrist tilt     (SG90)
-const int PIN_S4 = 10;   // Gripper / syringe actuator (SG90)
+// Pin 10 freed: the gripper is no longer a servo. It is a stepper-driven
+// syringe (jamming gripper), see the DRV8825 block below.
+
+// Syringe steppers (2x DRV8825). Both are plunger drives, so a step count is
+// a distance, not an angle, and over-travel bottoms the plunger out against
+// the barrel -- there are no limit switches on either axis.
+//
+// RESET and SLEEP are active-low and must be bridged together and tied to VDD
+// in hardware, or the driver accepts STEP pulses and silently does nothing.
+// MS1/MS2/MS3 are hardwired too; nothing here drives them.
+const int GRIP_STEP    = 33;
+const int GRIP_DIR     = 34;
+const int GRIP_ENABLE  = 35;   // active LOW
+const int INJ_STEP     = 36;
+const int INJ_DIR      = 37;
+const int INJ_ENABLE   = 38;   // active LOW
 
 // Rear-arm camera tilt (2-DOF rear arm: tilt + reach; azimuth is covered
 // by turntable rotation. REACH joint command not yet specified — not
@@ -258,7 +285,7 @@ const int PIN_IR_3 = A2;
 // OBJECTS
 // ═══════════════════════════════════════════════════════════════
 
-Servo s0, s1, s2, s3, s4, sCameraTilt;
+Servo s0, s1, s2, s3, sCameraTilt;
 TinyGPSPlus gps;
 HX711 loadCell;
 
@@ -269,30 +296,48 @@ HX711 loadCell;
 // doesn't block writing/testing the STEP/DIR sequencing itself.
 const int STEPS_PER_REV = 200;
 
-// Current arm pose [s0, s1, s2, s3, s4]
-int currentPose[5] = {90, 30, 150, 90, 160};
+// Current arm pose [s0, s1, s2, s3]
+int currentPose[4] = {90, 30, 150, 90};
 
-// Gripper state — provisional angles, see integration note #4 above.
-const int GRIP_PULL_ANGLE    = 90;   // engage vacuum grip
-const int GRIP_RELEASE_ANGLE = 160;  // release
+// ── Syringe stepper travel ───────────────────────────────────────
+// UNCALIBRATED. Neither syringe has been measured, and the lead screw pitch
+// cannot be deduced without its spec sheet, so these are placeholders chosen
+// to under-travel rather than over-travel: bottoming a plunger against the
+// barrel damages the mechanism, while a short stroke merely grips weakly.
+//
+// To calibrate, use GRIP:STEP:<n> / INJECT:STEP:<n>, which move a raw signed
+// step count. Command a known number, read the plunger travel straight off the
+// syringe's printed markings, repeat at two or three points to confirm
+// linearity, then set the constants below. That yields steps-per-mL and the
+// two gripper limits without ever needing the lead screw's rated pitch.
+const long GRIP_TRAVEL_STEPS = 800;   // PROVISIONAL — release -> full pull
+const long GRIP_STEP_LIMIT   = 4000;  // refuse any single move beyond this
+const long INJ_STEP_LIMIT    = 4000;
+
+// Position is tracked in steps from the released end, so a repeated PULL does
+// not keep driving into a plunger that is already bottomed out.
+long gripPositionSteps = 0;
+bool gripHomed = false;
 
 // Encoder counts
 // Encoder globals removed -- encoders not in this build (see pin note above).
 
 // ═══════════════════════════════════════════════════════════════
 // PRE-COMPUTED POSES
-// Format: {s0, s1, s2, s3, s4(gripper)}
+// Format: {s0, s1, s2, s3}
 // Calibrate these values on your actual physical arm.
 // Use the calibration sketch (below) to find correct angles.
+// The gripper is no longer part of a pose: it is a separate stepper axis
+// commanded by GRIP:PULL / GRIP:RELEASE.
 // ═══════════════════════════════════════════════════════════════
 
-const int POSE_PARK[5]         = {90,  30, 150, 90, 160};  // folded safe
-const int POSE_HOVER_TRAY[5]   = {45,  75, 110, 85, 160};  // above tray
-const int POSE_GRIP_TRAY[5]    = {45,  90, 130, 80, 160};  // at object
-const int POSE_LIFT_CLEAR[5]   = {45,  60, 100, 85, 90};   // lifted
-const int POSE_HOVER_TABLE[5]  = {135, 70, 115, 85, 90};   // above turntable
-const int POSE_PLACE_TABLE[5]  = {135, 85, 130, 80, 90};   // on turntable
-const int POSE_LIFT_TABLE[5]   = {135, 60, 100, 85, 160};  // lifted from table
+const int POSE_PARK[4]         = {90,  30, 150, 90};  // folded safe
+const int POSE_HOVER_TRAY[4]   = {45,  75, 110, 85};  // above tray
+const int POSE_GRIP_TRAY[4]    = {45,  90, 130, 80};  // at object
+const int POSE_LIFT_CLEAR[4]   = {45,  60, 100, 85};  // lifted
+const int POSE_HOVER_TABLE[4]  = {135, 70, 115, 85};  // above turntable
+const int POSE_PLACE_TABLE[4]  = {135, 85, 130, 80};  // on turntable
+const int POSE_LIFT_TABLE[4]   = {135, 60, 100, 85};  // lifted from table
 
 // ═══════════════════════════════════════════════════════════════
 // GY-80 IMU — I2C registers, Mahony AHRS state
@@ -558,7 +603,6 @@ void setup() {
   s1.attach(PIN_S1);
   s2.attach(PIN_S2);
   s3.attach(PIN_S3);
-  s4.attach(PIN_S4);
   sCameraTilt.attach(PIN_CAMERA_TILT);
   sCameraTilt.write(90);  // neutral tilt on boot
 
@@ -574,6 +618,14 @@ void setup() {
   pinMode(TT_ENABLE, OUTPUT);
   digitalWrite(TT_ENABLE, HIGH);  // start disabled (active LOW) -- no
                                     // holding current until first move
+
+  // Syringe steppers (DRV8825). Both start disabled: a plunger drive left
+  // energised at boot would hold torque against whatever position the
+  // mechanism happens to be in, and neither axis is homed.
+  pinMode(GRIP_STEP, OUTPUT); pinMode(GRIP_DIR, OUTPUT); pinMode(GRIP_ENABLE, OUTPUT);
+  pinMode(INJ_STEP, OUTPUT);  pinMode(INJ_DIR, OUTPUT);  pinMode(INJ_ENABLE, OUTPUT);
+  digitalWrite(GRIP_ENABLE, HIGH);
+  digitalWrite(INJ_ENABLE, HIGH);
 
   // LED driver (PCA9685)
   Wire.begin();
@@ -600,8 +652,10 @@ void setup() {
 
   // Move to park pose on startup
   moveToPose(POSE_PARK, 3);
-  s4.write(GRIP_RELEASE_ANGLE);
-  currentPose[4] = GRIP_RELEASE_ANGLE;
+  // The gripper is deliberately NOT driven at boot. A stepper has no absolute
+  // position, so any startup move would be relative to an unknown plunger
+  // position and could drive it into the barrel end. Position is treated as
+  // unknown until GRIP:RELEASE establishes the reference.
 
   // Stop motors
   stopMotors();
@@ -725,25 +779,53 @@ void processCommand(String cmd) {
     if (idx < 4) { Serial.println("ERR:ARM_SYNTAX"); return; }
 
     // Move smoothly
-    int targetPose[5] = {angles[0], angles[1], angles[2], angles[3],
-                         currentPose[4]};  // preserve gripper
+    int targetPose[4] = {angles[0], angles[1], angles[2], angles[3]};
     moveToPose(targetPose, 2);
     Serial.println("OK:ARM");
     return;
   }
 
-  // ── GRIP:PULL / GRIP:RELEASE ────────────────────────────────────
-  // Syringe-actuated vacuum gripper. Named commands only -- angle is
-  // never passed in from the caller (see integration note #4: the exact
-  // angles are provisional pending Mechanical's crank throw numbers).
+  // ── GRIP:PULL / GRIP:RELEASE / GRIP:STEP:<n> ────────────────────
+  // Stepper-driven syringe gripper (DRV8825). Named commands only for normal
+  // operation; the response shape is unchanged from the retired servo version
+  // so the Python DriveController/ArmController needed no edit.
+  //
+  // RELEASE is also the homing move: it drives to the released end and resets
+  // the step reference, because a stepper has no absolute position and the
+  // firmware cannot know where the plunger sits after a power cycle.
   if (cmd == "GRIP:PULL") {
-    driveGripperTo(GRIP_PULL_ANGLE);
+    if (!gripHomed) {
+      // Pulling from an unknown position could bottom the plunger out.
+      Serial.println("ERR:GRIP_NOT_HOMED_SEND_RELEASE_FIRST");
+      return;
+    }
+    stepSyringe(GRIP_STEP, GRIP_DIR, GRIP_ENABLE,
+                GRIP_TRAVEL_STEPS - gripPositionSteps);
+    gripPositionSteps = GRIP_TRAVEL_STEPS;
     Serial.println("OK:GRIP");
     return;
   }
   if (cmd == "GRIP:RELEASE") {
-    driveGripperTo(GRIP_RELEASE_ANGLE);
+    // Always drive the full travel toward release. Overshooting toward the
+    // released end is safe -- the plunger simply stops at its own limit --
+    // whereas overshooting toward pull crushes it against the barrel.
+    stepSyringe(GRIP_STEP, GRIP_DIR, GRIP_ENABLE, -GRIP_TRAVEL_STEPS);
+    gripPositionSteps = 0;
+    gripHomed = true;
     Serial.println("OK:GRIP");
+    return;
+  }
+  if (cmd.startsWith("GRIP:STEP:")) {
+    // Calibration aid: move a raw signed step count and report the new
+    // position, so travel can be measured off the syringe's own markings.
+    long steps = cmd.substring(10).toInt();
+    if (labs(steps) > GRIP_STEP_LIMIT) {
+      Serial.println("ERR:GRIP_STEP_TOO_LARGE");
+      return;
+    }
+    stepSyringe(GRIP_STEP, GRIP_DIR, GRIP_ENABLE, steps);
+    gripPositionSteps += steps;
+    Serial.print("OK:GRIP:STEP:"); Serial.println(gripPositionSteps);
     return;
   }
   if (cmd.startsWith("GRIP:")) {
@@ -751,6 +833,26 @@ void processCommand(String cmd) {
     // silently accept, so a caller still on the old protocol gets a clear
     // error instead of the gripper silently moving to the wrong position.
     Serial.println("ERR:GRIP_PROTOCOL_RETIRED_USE_PULL_OR_RELEASE");
+    return;
+  }
+
+  // ── INJECT:STEP:<n> ─────────────────────────────────────────────
+  // Calibration aid only. INJECT:<uL> stays unimplemented until a
+  // steps-per-uL figure exists, which is what this command is for.
+  if (cmd.startsWith("INJECT:STEP:")) {
+    long steps = cmd.substring(12).toInt();
+    if (labs(steps) > INJ_STEP_LIMIT) {
+      Serial.println("ERR:INJECT_STEP_TOO_LARGE");
+      return;
+    }
+    stepSyringe(INJ_STEP, INJ_DIR, INJ_ENABLE, steps);
+    Serial.print("OK:INJECT:STEP:"); Serial.println(steps);
+    return;
+  }
+  if (cmd.startsWith("INJECT:")) {
+    // Volume dosing needs a measured steps-per-uL. Guessing it would dispense
+    // an unknown amount of consolidant onto a real artefact.
+    Serial.println("NACK:INJECT:UNCALIBRATED_USE_INJECT_STEP");
     return;
   }
 
@@ -925,7 +1027,7 @@ void stopMotors() {
 // ARM CONTROL
 // ═══════════════════════════════════════════════════════════════
 
-void moveToPose(const int target[5], int speedFactor) {
+void moveToPose(const int target[4], int speedFactor) {
   /*
    * Smoothly interpolate from current pose to target pose.
    * speedFactor: 1=fast, 2=normal, 3=slow
@@ -949,24 +1051,44 @@ void moveToPose(const int target[5], int speedFactor) {
     delay(20);  // 20ms per step
   }
 
-  // Update current pose (all 5 including gripper)
+  // Update current pose
   for (int i = 0; i < 4; i++) currentPose[i] = target[i];
-  // Note: gripper (currentPose[4]) is controlled separately via GRIP command
 }
 
-void driveGripperTo(int angle) {
-  // Slow move to protect fragile objects — same 15ms/degree pacing as
-  // the original numeric protocol, just driven to a fixed calibrated
-  // angle instead of an arbitrary caller-supplied one.
-  angle = constrain(angle, 0, 180);
-  int current = currentPose[4];
-  int step    = (angle > current) ? 1 : -1;
-  while (current != angle) {
-    current += step;
-    s4.write(current);
-    delay(15);
+// ═════════════════════════════════════════════════════════════
+// SYRINGE STEPPERS (DRV8825, STEP/DIR)
+// ═════════════════════════════════════════════════════════════
+
+void stepSyringe(int stepPin, int dirPin, int enablePin, long steps) {
+  /*
+   * Move one syringe axis by a signed step count. Positive drives toward the
+   * pulled/dispensing end.
+   *
+   * The driver is enabled only for the duration of the move. Leaving a DRV8825
+   * enabled holds torque, which on a plunger drive means it keeps pressing
+   * against whatever it stopped on and heats both coil and driver for no
+   * benefit -- the mechanism is not back-driven by gravity.
+   *
+   * Pulse timing matches the turntable's conservative 2ms period rather than
+   * the driver's minimum, since neither syringe axis has been run under load
+   * and a skipped step here is a silent position error with no encoder to
+   * catch it.
+   */
+  if (steps == 0) return;
+
+  digitalWrite(enablePin, LOW);   // active LOW
+  digitalWrite(dirPin, steps > 0 ? HIGH : LOW);
+  delayMicroseconds(5);           // DRV8825 needs DIR stable before STEP
+
+  long count = labs(steps);
+  for (long i = 0; i < count; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(stepPin, LOW);
+    delay(2);
   }
-  currentPose[4] = angle;
+
+  digitalWrite(enablePin, HIGH);  // release holding current
 }
 
 // ═══════════════════════════════════════════════════════════════
