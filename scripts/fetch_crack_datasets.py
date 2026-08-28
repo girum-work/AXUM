@@ -43,19 +43,40 @@ explicitly. Whether the masks label fissures as crack decides whether a model
 learns "visually crack-like" or "structurally damaged", and those are different
 questions. Run --inspect to see what the masks actually contain.
 
-LARGER SOURCES, NOT YET ACQUIRED. 577 images is the binding constraint on this
-work, and it is self-imposed: the field has assembled far larger collections.
-Sizes below are as reported by the authors; every licence needs checking before
-use, and none of these links are scripted here because none were verified.
+LARGER SOURCES. 577 images is the binding constraint on this work, and it is
+self-imposed: the field has assembled far larger collections.
 
-    OmniCrack30k   30,000 images from 20+ datasets, 9 billion pixels, spanning
+VERIFIED AND USABLE. GT-CrackSeg, the codebase released alongside the 2025
+review (arXiv 2508.10256), publishes four datasets from one Drive folder linked
+in its README, with the instruction "please follow each dataset's original
+license/terms":
+
+    https://github.com/GT-SCI/GT-CrackSeg
+
+    Khanhha    ~11,200 images, merged from 12 crack segmentation datasets
+    TUT          1,408 images, diverse real-world backgrounds
+    DeepCrack      537 images, the family Stone331 belongs to
+    CrackTree      206 images
+
+Khanhha alone is 19x what we train on. The download is a Drive FOLDER, which is
+not scriptable for the same reason Stone331's OneDrive link is not, so it is
+fetched by hand. Unpack into data/crack_datasets/<name>/<Split>/{img,anno} and
+scripts/train_cracknet.py finds it automatically -- that is GT-CrackSeg's own
+layout, kept deliberately so their configs and ours agree.
+
+Their loader carries this comment, which is worth knowing before resizing
+anything: "Skip resizing for CrackTree (thin cracks degrade with resizing)".
+That is the same effect measured here, where downscaling Stone331 512->256
+shattered one connected centreline into ~29 fragments.
+
+NOT YET VERIFIED. Sizes are as reported by the authors; licences unchecked and
+no links recorded because none were confirmed:
+
+    OmniCrack30k   30,000 images, 9 billion pixels, 20+ datasets, spanning
                    asphalt, ceramic, concrete, masonry and steel. CVPR W 2024.
-                   ~52x our current data. The paper's own subtitle is "the
-                   Reasonable Effectiveness of Transfer Learning".
     CrackSeg9k     ~9,000 images. Combines earlier datasets AND unifies their
                    annotations, which is the MCS-vs-Stone331 convention problem
                    solved properly rather than by our skeletonising workaround.
-    Khanh11k       ~11,200 images merged from 12 crack segmentation datasets.
     Conglomerate   10,995 images from Virginia DOT bridge inspection reports.
     S2DS           743 images labelled crack, spalling, corrosion,
                    efflorescence, VEGETATION and control point. The vegetation

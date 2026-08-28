@@ -76,6 +76,37 @@ class CrackNetConfig:
     decoder_channels: tuple[int, ...] = (256, 128, 64, 32, 16)
     deep_supervision: bool = True
     coord_attention: bool = True
+    global_attention: bool = True
+    depth_input: bool = False
+
+
+class BottleneckAttention(nn.Module):
+    """
+    Self-attention over the bottleneck, giving every position the whole frame.
+
+    A ResNet-34 bottleneck at 512px input is 16x16, so its receptive field is
+    large but its aggregation is still local convolution. Alshawabkeh et al.
+    (CMC 2025) measure UNETr beating a plain U-Net by 9.3 DSC on Crack500, and
+    global aggregation is the difference. 256 tokens is cheap enough to test
+    that claim without adopting a transformer encoder wholesale.
+    """
+
+    def __init__(self, channels: int, heads: int = 8, tokens: int = 256):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels)
+        self.attention = nn.MultiheadAttention(channels, heads, batch_first=True)
+        self.position = nn.Parameter(torch.zeros(1, tokens, channels))
+        nn.init.trunc_normal_(self.position, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, channels, height, width = x.shape
+        tokens = x.flatten(2).transpose(1, 2)
+        if self.position.shape[1] == tokens.shape[1]:
+            tokens = tokens + self.position
+        normed = self.norm(tokens)
+        attended, _ = self.attention(normed, normed, normed, need_weights=False)
+        tokens = tokens + attended
+        return tokens.transpose(1, 2).reshape(batch, channels, height, width)
 
 
 class CoordinateAttention(nn.Module):
@@ -148,10 +179,16 @@ class CrackNet(nn.Module):
 
         weights = ResNet34_Weights.IMAGENET1K_V1 if self.config.pretrained else None
         encoder = resnet34(weights=weights)
+        if self.config.depth_input:
+            encoder.conv1 = self._add_depth_channel(encoder.conv1)
         self.stem = nn.Sequential(encoder.conv1, encoder.bn1, encoder.relu)
         self.pool = encoder.maxpool
         self.layer1, self.layer2 = encoder.layer1, encoder.layer2
         self.layer3, self.layer4 = encoder.layer3, encoder.layer4
+
+        self.bottleneck_attention = (BottleneckAttention(512)
+                                     if self.config.global_attention
+                                     else nn.Identity())
 
         skips = (256, 128, 64, 64, 0)
         channels = self.config.decoder_channels
@@ -171,13 +208,36 @@ class CrackNet(nn.Module):
             [nn.Conv2d(c, 1, 1) for c in channels[:-1]]
         ) if self.config.deep_supervision else nn.ModuleList()
 
+    @staticmethod
+    def _add_depth_channel(conv: nn.Conv2d) -> nn.Conv2d:
+        """
+        Widen the stem to RGB + geometry, with the new channel zero-initialised.
+
+        Yuan et al. (Remote Sens. 2024) survey 120 papers and rate multimodal
+        fusion strongest on both adaptability and noise handling, which is the
+        failure mode here: lichen and gravel shadows are dark and elongated in
+        RGB and flat in geometry. Zero-init means the model starts exactly as
+        the pretrained RGB model and learns to use depth only if it helps, so
+        adding the channel cannot itself cost accuracy.
+
+        NOT YET FED. Producing depth aligned to a photograph from the Meshroom
+        output in scans/meshes is a separate piece of work; this is the input
+        path, not the data.
+        """
+        wider = nn.Conv2d(4, conv.out_channels, conv.kernel_size,
+                          conv.stride, conv.padding, bias=conv.bias is not None)
+        with torch.no_grad():
+            wider.weight[:, :3] = conv.weight
+            wider.weight[:, 3:] = 0.0
+        return wider
+
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor | list]:
         size = x.shape[-2:]
         s0 = self.stem(x)
         s1 = self.layer1(self.pool(s0))
         s2 = self.layer2(s1)
         s3 = self.layer3(s2)
-        bottleneck = self.layer4(s3)
+        bottleneck = self.bottleneck_attention(self.layer4(s3))
 
         skips = [s3, s2, s1, s0, None]
         feature = bottleneck

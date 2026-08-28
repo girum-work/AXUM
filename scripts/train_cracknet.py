@@ -54,6 +54,30 @@ SOURCES = {
                  "convention": "centreline"},
 }
 
+# GT-CrackSeg publishes DeepCrack, TUT, Khanhha and CrackTree in one layout:
+# <name>/<Split>/img and <name>/<Split>/anno. Khanhha alone is ~11,200 images
+# against our 577, and the binding constraint on this work has been data, not
+# architecture. Anything dropped into data/crack_datasets in that shape is
+# picked up automatically.
+GT_SPLITS = ("Train", "Val", "Test")
+
+
+def discover_gt_layout(root: Path) -> dict[str, dict]:
+    """Find datasets stored in the GT-CrackSeg directory convention."""
+    found = {}
+    if not root.exists():
+        return found
+    for folder in sorted(p for p in root.iterdir() if p.is_dir()):
+        for split in GT_SPLITS:
+            images, masks = folder / split / "img", folder / split / "anno"
+            if images.is_dir() and masks.is_dir():
+                found[f"{folder.name}/{split}"] = {
+                    "images": images, "masks": masks,
+                    # Every one of these annotates the crack body; the
+                    # centreline head takes their skeleton, as for MCS.
+                    "convention": "body"}
+    return found
+
 
 def index_by_stem(directory: Path) -> dict[str, Path]:
     return {p.stem: p for p in sorted(directory.rglob("*"))
@@ -62,10 +86,15 @@ def index_by_stem(directory: Path) -> dict[str, Path]:
 
 def collect_pairs() -> list[tuple[Path, Path, str]]:
     pairs = []
-    for name, spec in SOURCES.items():
+    catalogue = dict(SOURCES)
+    catalogue.update(discover_gt_layout(Path("data/crack_datasets")))
+    for name, spec in catalogue.items():
         images = index_by_stem(spec["images"])
         masks = index_by_stem(spec["masks"])
-        for stem in sorted(set(images) & set(masks)):
+        shared = sorted(set(images) & set(masks))
+        if shared:
+            print(f"  {name:28s} {len(shared):>6,d} pairs  ({spec['convention']})")
+        for stem in shared:
             pairs.append((images[stem], masks[stem], spec["convention"]))
     return pairs
 
@@ -228,6 +257,8 @@ def main() -> int:
                         help="Ablate Coordinate Attention in the decoder")
     parser.add_argument("--no-deep-supervision", action="store_true",
                         help="Ablate the per-scale side outputs")
+    parser.add_argument("--no-global-attention", action="store_true",
+                        help="Ablate bottleneck self-attention")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--amp", action="store_true")
@@ -269,6 +300,7 @@ def main() -> int:
         pretrained=not args.no_pretrained,
         coord_attention=not args.no_coord_attention,
         deep_supervision=not args.no_deep_supervision,
+        global_attention=not args.no_global_attention,
     )).to(device)
     print(f"parameters: {model.parameter_count():,}  device: {device}")
 
