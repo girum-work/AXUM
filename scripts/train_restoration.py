@@ -179,6 +179,15 @@ def main() -> int:
     parser.add_argument("--amp", action="store_true",
                         help="bfloat16 autocast; roughly halves step time on Ada")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--split-seed", type=int, default=42,
+                        help="Seeds the corpus shuffle only. Kept separate from "
+                             "--seed so a seed sweep varies initialisation and "
+                             "damage sampling while the train/val split - and "
+                             "therefore the vocabulary, which is built from the "
+                             "training half - stays fixed.")
+    parser.add_argument("--tag", default="",
+                        help="Suffix for the model and log filenames. A sweep "
+                             "otherwise overwrites its own results.")
     parser.add_argument("--limit", type=int, default=0, help="0 = all phrases")
     parser.add_argument("--limit-chars", type=int, default=0,
                         help="Cap training text by character count. Chunk lengths "
@@ -193,13 +202,12 @@ def main() -> int:
                              "so an uncommitted run is otherwise lost entirely.")
     args = parser.parse_args()
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    run_name = f"{args.language}_{args.tag}" if args.tag else args.language
 
     phrases = load_phrases(args.corpus, args.max_len)
     # Shuffle first: corpus order is canonical book order, so slicing the head
     # would sample Genesis rather than the whole work.
-    random.shuffle(phrases)
+    random.Random(args.split_seed).shuffle(phrases)
     if args.limit:
         phrases = phrases[:args.limit]
     if args.limit_chars:
@@ -218,9 +226,14 @@ def main() -> int:
     val_phrases, train_phrases = phrases[:split], phrases[split:]
     vocab = FidelVocab.from_corpus(train_phrases)
 
+    # Only now, so everything above depends on --split-seed alone.
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     print(f"{args.language}: {len(train_phrases):,} train | {len(val_phrases):,} val "
           f"| {sum(len(p) for p in train_phrases):,} train chars "
-          f"| vocab {len(vocab)} | eval damage {args.eval_damage_rate:.0%}")
+          f"| vocab {len(vocab)} | eval damage {args.eval_damage_rate:.0%} "
+          f"| seed {args.seed} | split-seed {args.split_seed}")
 
     train_set = RestorationDataset(train_phrases, vocab, args.max_len)
     val_set = RestorationDataset(val_phrases, vocab, args.max_len, fixed_seed=1234,
@@ -257,7 +270,7 @@ def main() -> int:
     loss_fn = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    resume_path = args.out / f"{args.language}_last.pth"
+    resume_path = args.out / f"{run_name}_last.pth"
     best = 0.0
     history = []
     start_epoch = 1
@@ -320,7 +333,7 @@ def main() -> int:
         if exact > best:
             best = exact
             save_restoration_model(model, vocab,
-                                   args.out / f"{args.language}_restoration.pth")
+                                   args.out / f"{run_name}_restoration.pth")
 
         torch.save({
             "state_dict": model.state_dict(),
@@ -332,16 +345,18 @@ def main() -> int:
             "vocab_fingerprint": vocab.fingerprint(),
         }, resume_path)
 
-    log_path = Path("logs/restoration") / f"{args.language}_training.json"
+    log_path = Path("logs/restoration") / f"{run_name}_training.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(json.dumps({
         "language": args.language,
         "corpus": str(args.corpus),
+        "seed": args.seed,
+        "split_seed": args.split_seed,
         "parameters": model.parameter_count(),
         "best_top1": best,
         "history": history,
     }, indent=2), encoding="utf-8")
-    print(f"\nbest top-1 {best:.2%} -> {args.out / f'{args.language}_restoration.pth'}")
+    print(f"\nbest top-1 {best:.2%} -> {args.out / f'{run_name}_restoration.pth'}")
     return 0
 
 
