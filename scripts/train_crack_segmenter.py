@@ -87,17 +87,21 @@ class CrackDataset(Dataset):
 
     def __init__(self, pairs: list[tuple[Path, Path]], size: int,
                  augment: bool = False, crop: bool = False,
-                 min_positive: float = 0.0):
+                 min_positive: float = 0.0, fixed_seed: int | None = None):
         self.pairs = pairs
         self.size = size
         self.augment = augment
         self.crop = crop
         self.min_positive = min_positive
+        # Validation must see the same windows every epoch, or the metric moves
+        # with the crop and epoch-to-epoch F1 is not a comparison.
+        self.fixed_seed = fixed_seed
 
     def __len__(self) -> int:
         return len(self.pairs)
 
     def _random_crop(self, image: np.ndarray, mask: np.ndarray,
+                     rng: random.Random,
                      attempts: int = 12) -> tuple[np.ndarray, np.ndarray]:
         """
         Take a native-scale window, preferring one that contains crack.
@@ -111,8 +115,8 @@ class CrackDataset(Dataset):
 
         best = None
         for _ in range(attempts):
-            y = random.randint(0, height - self.size)
-            x = random.randint(0, width - self.size)
+            y = rng.randint(0, height - self.size)
+            x = rng.randint(0, width - self.size)
             mask_crop = mask[y:y + self.size, x:x + self.size]
             positive = float((mask_crop > 0).mean())
             if best is None or positive > best[0]:
@@ -127,6 +131,8 @@ class CrackDataset(Dataset):
         image_path, mask_path = self.pairs[index]
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        rng = (random if self.fixed_seed is None
+               else random.Random(self.fixed_seed + index))
 
         if self.crop:
             # Match the image to the mask's own scale before cropping, so a
@@ -134,7 +140,7 @@ class CrackDataset(Dataset):
             if image.shape[:2] != mask.shape[:2]:
                 image = cv2.resize(image, (mask.shape[1], mask.shape[0]),
                                    interpolation=cv2.INTER_AREA)
-            image, mask = self._random_crop(image, mask)
+            image, mask = self._random_crop(image, mask, rng)
             if image.shape[0] != self.size or image.shape[1] != self.size:
                 image = cv2.resize(image, (self.size, self.size),
                                    interpolation=cv2.INTER_AREA)
@@ -162,33 +168,56 @@ class CrackDataset(Dataset):
         return image_tensor, mask_tensor
 
 
+THRESHOLDS = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, threshold: float = 0.5) -> dict:
-    """Mask F1/IoU, plus how well predicted area ranks true area."""
+    """
+    Mask F1/IoU, plus how well predicted area ranks true area.
+
+    Scored across a threshold sweep, not at 0.5 alone. Crack is 0.1-5% of the
+    pixels, so the sigmoid is pushed hard towards zero and the F1-optimal
+    operating point is nowhere near 0.5; reporting only 0.5 measures the
+    threshold as much as the model.
+    """
     model.eval()
-    tp = fp = fn = 0.0
+    counts = {t: [0.0, 0.0, 0.0] for t in THRESHOLDS}
     predicted_areas: list[float] = []
     true_areas: list[float] = []
 
     for images, masks in loader:
         images, masks = images.to(device), masks.to(device)
         probability = torch.sigmoid(model(images))
+
+        for t in THRESHOLDS:
+            predicted = (probability > t).float()
+            counts[t][0] += float((predicted * masks).sum())
+            counts[t][1] += float((predicted * (1 - masks)).sum())
+            counts[t][2] += float(((1 - predicted) * masks).sum())
+
         predicted = (probability > threshold).float()
-
-        tp += float((predicted * masks).sum())
-        fp += float((predicted * (1 - masks)).sum())
-        fn += float(((1 - predicted) * masks).sum())
-
         for i in range(images.size(0)):
             predicted_areas.append(float(predicted[i].mean()))
             true_areas.append(float(masks[i].mean()))
 
-    precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall = tp / (tp + fn) if (tp + fn) else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    iou = tp / (tp + fp + fn) if (tp + fp + fn) else 0.0
+    def score(tp: float, fp: float, fn: float) -> tuple[float, float, float, float]:
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = (2 * precision * recall / (precision + recall)
+              if (precision + recall) else 0.0)
+        iou = tp / (tp + fp + fn) if (tp + fp + fn) else 0.0
+        return precision, recall, f1, iou
+
+    precision, recall, f1, iou = score(*counts[threshold])
+    sweep = {t: score(*counts[t]) for t in THRESHOLDS}
+    best_t = max(sweep, key=lambda t: sweep[t][2])
+    best_p, best_r, best_f1, best_iou = sweep[best_t]
 
     return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
+            "best_threshold": best_t, "best_precision": best_p,
+            "best_recall": best_r, "best_f1": best_f1, "best_iou": best_iou,
+            "sweep": {str(t): sweep[t][2] for t in THRESHOLDS},
             "area_rank_corr": spearman(true_areas, predicted_areas)}
 
 
@@ -268,7 +297,8 @@ def main() -> int:
     train_set = CrackDataset(to_pairs(train_stems), args.size, augment=True,
                              crop=args.crop, min_positive=args.min_positive)
     val_set = CrackDataset(to_pairs(val_stems), args.size, augment=False,
-                           crop=args.crop, min_positive=args.min_positive)
+                           crop=args.crop, min_positive=args.min_positive,
+                           fixed_seed=1234)
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, drop_last=len(train_set) > args.batch_size)
     val_loader = DataLoader(val_set, batch_size=args.batch_size,
@@ -278,13 +308,15 @@ def main() -> int:
         float(train_set[i][1].mean()) for i in range(min(len(train_set), 60))
     ]))
     # The textbook balanced weight, (1 - p) / p, is degenerate at these rates.
-    # Measured on Stone331 (p = 0.26%, balanced = 387), 6 epochs:
+    # Measured on Stone331 (p = 0.26%, balanced = 387), 6-epoch probes scored
+    # at threshold 0.5:
     #     weight 387  P 0.020  R 0.923  F1 0.040   predicts crack everywhere
     #     weight   1  P 0.000  R 0.000  F1 0.000   predicts nothing
     #     weight  20  P 0.103  R 0.263  F1 0.148   beats OpenCV's 0.111
     # 20 is sqrt(387), the geometric mean of the two failures, so the square
     # root is the default. Dice already absorbs imbalance; a full balanced
-    # weight makes BCE fight it.
+    # weight makes BCE fight it. The ordering is what those probes establish;
+    # the F1 values are not converged and must not be quoted as results.
     balanced = (1 - positive_rate) / max(positive_rate, 1e-6)
     pos_weight = (torch.tensor([args.pos_weight]) if args.pos_weight > 0
                   else torch.tensor([max(1.0, balanced ** 0.5)]))
@@ -303,6 +335,7 @@ def main() -> int:
     pos_weight = pos_weight.to(device)
 
     best = 0.0
+    best_threshold = 0.5
     history = []
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -326,18 +359,21 @@ def main() -> int:
         metrics.update(epoch=epoch, loss=running / max(len(train_loader), 1))
         history.append(metrics)
         print(f"  epoch {epoch:>3} | loss {metrics['loss']:6.3f} "
-              f"| F1 {metrics['f1']:6.3f} | IoU {metrics['iou']:6.3f} "
-              f"| P {metrics['precision']:.3f} R {metrics['recall']:.3f} "
+              f"| F1 {metrics['best_f1']:6.3f} @{metrics['best_threshold']:.2f} "
+              f"| F1@0.5 {metrics['f1']:6.3f} | IoU {metrics['best_iou']:6.3f} "
+              f"| P {metrics['best_precision']:.3f} R {metrics['best_recall']:.3f} "
               f"| areaCorr {metrics['area_rank_corr']:+.3f} "
               f"| {time.time() - started:5.1f}s")
 
-        if metrics["f1"] > best:
-            best = metrics["f1"]
+        if metrics["best_f1"] > best:
+            best = metrics["best_f1"]
+            best_threshold = metrics["best_threshold"]
             save_segmenter(model, args.out / f"crack_{args.dataset}.pth", {
                 "dataset": args.dataset,
                 "convention": spec["convention"],
                 "size": args.size,
                 "best_f1": best,
+                "threshold": best_threshold,
                 "positive_rate": positive_rate,
             })
 
@@ -346,13 +382,16 @@ def main() -> int:
     log_path.write_text(json.dumps({
         "dataset": args.dataset,
         "convention": spec["convention"],
+        "epochs": args.epochs,
         "parameters": model.parameter_count(),
         "best_f1": best,
+        "best_threshold": best_threshold,
         "opencv_baseline_f1": 0.111,
         "history": history,
     }, indent=2), encoding="utf-8")
 
-    print(f"\nbest F1 {best:.3f} (OpenCV detector scores 0.111 on Stone331)")
+    print(f"\nbest F1 {best:.3f} at threshold {best_threshold:.2f} "
+          f"(OpenCV detector scores 0.111 on Stone331)")
     print(f"saved to {args.out / f'crack_{args.dataset}.pth'}")
     return 0
 
