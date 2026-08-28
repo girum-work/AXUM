@@ -34,6 +34,28 @@ wide, Stone331 traces ~1.9px centrelines, a 23x difference):
     width       supervised only where body annotation exists, loss masked
                 elsewhere, so severity keeps the width information that a
                 centreline throws away
+
+WHERE THIS SITS. Alshawabkeh et al., CMC 2025 (CC BY 4.0) benchmark eight
+models on identical data. Dice similarity coefficient, Crack500 / DeepCrack:
+
+    U-Net               66.07 / 83.73    ~31M    10ms
+    TransUNet           68.96 / 84.69    ~38M    60ms
+    YOLOv8              76.64 / 88.70   ~3.5M   1-3ms
+    UNETr               75.39 / 89.92    104M   150ms
+    Mask R-CNN          76.44 / 90.03    ~44M    50ms
+    MaskerTransformer   80.04 / 91.37    ~91M    65ms
+
+Read that as a caution, not a target: plain U-Net is the WEAKEST model in the
+table, and this is a U-Net. Two things follow. UNETr beats U-Net by 9.3 points
+on Crack500, which supports the long-range-context argument this architecture
+rests on but suggests attention may serve it better than a ResNet-34 decoder
+with clDice. And YOLOv8 is second on Crack500 at a tenth the parameters, which
+contradicts the claim that boxes are a poor primitive for cracks -- that claim
+was reasoned, not measured, and the measurement disagrees.
+
+None of those numbers are comparable to the cell-level F1 this trains against;
+they are pixel DSC on different data. They bound what is achievable, not what
+we should expect.
 """
 
 from __future__ import annotations
