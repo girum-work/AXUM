@@ -38,14 +38,52 @@ CAMERA_HEIGHT   = 480
 CAMERA_FPS      = 10
 
 # ─── Crack Detection ──────────────────────────────────────────
-BLUR_KERNEL     = (5, 5)
-USE_AUTO_CANNY  = True
-CANNY_T1        = 50
-CANNY_T2        = 150
+# Every image is resized to this long edge before detection. Filter sizes are
+# in pixels, so without it a 12MP photo and a 0.3MP one are processed at
+# different physical scales and the same surface scores differently.
+CRACK_WORKING_EDGE = 512
+# Sigmas of the ridge filter bank, in working-resolution pixels. A ridge filter
+# sees structures up to roughly 2*sigma wide, so this bank covers 2-32px at
+# 512px. The bank must span the widths that matter: at a top sigma of 8 the deep
+# joints between rock slabs were missed entirely, for the same reason the old
+# 15x15 black-hat missed them.
+CRACK_RIDGE_SIGMAS = (1.0, 2.0, 4.0, 8.0, 16.0)
+# ABSOLUTE floor on the ridge response, not a percentile. A percentile keeps a
+# fixed share of pixels on every image, so an undamaged surface still returns a
+# full mask; a floor lets a clean rock return nothing. A uniform plate responds
+# 0.0000, so it stays empty.
+CRACK_RIDGE_THRESHOLD = 0.005
+# ...but a floor alone does not transfer between surfaces. Median ridge response
+# measured 0.0011 on MCS marble and 0.0252-0.0321 on natural stone and concrete,
+# so 0.005 marked 95% of a concrete wall. The seed threshold is therefore the
+# larger of the floor and this multiple of the image's own median response: a
+# crack must stand out from THIS surface's texture as well as clear an absolute
+# minimum. Unlike a percentile the retained fraction is free to be zero.
+# Measured: multiple 3 costs MCS F1 nothing (0.346 -> 0.347) and cuts the wall
+# photo's seeds from 95.2% to 2.8% of pixels.
+CRACK_TEXTURE_MULTIPLE = 3.0
+# Flattened intensity below which a pixel may be grown into a crack. 128 is
+# exactly the local background, so 118 means "at least 8% darker than its
+# surroundings". Used only to extend a region that a ridge seed already found.
+CRACK_DARKNESS_CUT = 118.0
+# Shape gate, in working-resolution pixels. Lichen, grain and sensor noise are
+# dark but compact; a crack is long and thin. These reject the former.
+CRACK_MIN_EXTENT_PX = 16
+# MCS crack bodies measure 21.9px wide, so the first value tried here (20)
+# rejected real cracks: MCS F1 0.223 at 20, 0.347 at 40, 0.435 at 80. 80 also
+# lets a shadow band through on photographs (one test image jumped to 28.8% of
+# pixels), so 40 is the point where width stops costing recall and starts
+# costing precision.
+CRACK_MAX_MEAN_WIDTH_PX = 40
 MIN_CRACK_AREA  = 30
 MIN_CRACK_LEN   = 40
 MIN_ASPECT_RATIO= 3.0
 CRACK_SEVERITY_THRESHOLD = 0.4  # below = treatable, above = flag
+# Retained for the legacy Canny path, kept reachable via CrackDetector(method=)
+BLUR_KERNEL     = (5, 5)
+USE_AUTO_CANNY  = True
+CANNY_T1        = 50
+CANNY_T2        = 150
 
 # ─── Heatmap ──────────────────────────────────────────────────
 GRID_ROWS       = 10

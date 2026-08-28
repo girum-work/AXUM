@@ -13,6 +13,11 @@ opencv-python-headless==4.13.0.92   # headless: no cv2.imshow/GUI calls anywhere
 numpy==1.26.4
 Pillow==10.4.0
 fonttools
+# Ridge filtering for crack detection. OpenCV has no Sato/Frangi/Meijering, and
+# a hand-rolled scale-space Hessian measured worse (MCS F1 0.541 vs 0.636) --
+# getting Gaussian derivative normalisation right is the known trap. The Pi does
+# not import this; pi/requirements.txt stays Flask + requests + chardet.
+scikit-image==0.24.0
 
 # Machine learning
 # TODO(CPU/GPU tier decision): pinned here as plain CPU-default wheels.
