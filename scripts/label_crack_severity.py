@@ -28,6 +28,7 @@ eye and would give false precision:
 
 Usage:
     python scripts/label_crack_severity.py --input-dir data/crack_images
+    python scripts/label_crack_severity.py --panels-only --stratified 30
     python scripts/label_crack_severity.py --calibrate
 """
 
@@ -48,6 +49,9 @@ from config import CRACK_SEVERITY_THRESHOLD
 from src.crack_detection.detector import CrackDetector
 
 LABEL_PATH = Path("data/crack_labels.json")
+# Records which images the stratified sampler chose, so rating can be stopped
+# and resumed without re-sampling a different set and rewriting the panels.
+SELECTION_PATH = Path("data/crack_review/selection.json")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 # Below this, correlation on so few points is noise rather than signal.
 MIN_USEFUL_LABELS = 15
@@ -166,19 +170,36 @@ def stratified_sample(images: list[Path], detector: CrackDetector, count: int,
 
 
 def run_labelling(directories: list[Path], panel_dir: Path,
-                  stratified: int = 0) -> int:
+                  stratified: int = 0, panels_only: bool = False) -> int:
     """
     Write review panels to disk, then take ratings from the terminal.
 
     No cv2.imshow: requirements.txt pins opencv-python-headless, which has no
     GUI at all. Writing files also means this works over SSH and on the Pi.
     """
+    labels = load_labels()
+
+    # Panels already prepared: rate those rather than scoring the corpus again.
+    if not stratified and not panels_only and SELECTION_PATH.exists():
+        selection = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
+        written = [(Path(entry["image"]), Path(entry["panel"]),
+                    entry["score"], entry["contours"])
+                   for entry in selection
+                   if entry["image"] not in labels
+                   and Path(entry["panel"]).exists()]
+        if written:
+            print(f"Resuming {SELECTION_PATH}: {len(selection)} panels, "
+                  f"{len(selection) - len(written)} already rated, "
+                  f"{len(written)} to go")
+            return prompt_for_ratings(written, labels, panel_dir)
+        print(f"Every panel in {SELECTION_PATH} is rated. Run with --calibrate.")
+        return 0
+
     images = find_images(directories)
     if not images:
         print(f"No images under {[str(d) for d in directories]}", file=sys.stderr)
         return 1
 
-    labels = load_labels()
     detector = CrackDetector()
     pending = [p for p in images if str(p.as_posix()) not in labels]
 
@@ -207,8 +228,24 @@ def run_labelling(directories: list[Path], panel_dir: Path,
                                 f"contours {result.crack_count}"))
         written.append((path, panel_path, result.severity_score, result.crack_count))
 
+    SELECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SELECTION_PATH.write_text(json.dumps(
+        [{"image": str(path.as_posix()), "panel": str(panel.as_posix()),
+          "score": score, "contours": count}
+         for path, panel, score, count in written], indent=2), encoding="utf-8")
+
     print(f"\nWrote {len(written)} review panels to {panel_dir}")
-    print("Open that folder in an image viewer, then rate each below.")
+    if panels_only:
+        print(f"Selection recorded in {SELECTION_PATH}. "
+              f"Re-run without --panels-only to rate them.")
+        return 0
+    return prompt_for_ratings(written, labels, panel_dir)
+
+
+def prompt_for_ratings(written: list[tuple[Path, Path, float, int]],
+                       labels: dict[str, int], panel_dir: Path) -> int:
+    """Take a 1-5 rating per panel, saving after each so a quit loses nothing."""
+    print(f"Open {panel_dir} in an image viewer, then rate each below.")
     print("Original is on the left, detector overlay on the right.\n")
     for line in SCALE_HELP:
         print("  " + line)
@@ -345,14 +382,24 @@ def main() -> int:
     parser.add_argument("--stratified", type=int, default=0,
                         help="Select this many images spread across the detector's "
                              "severity range instead of taking all of them")
+    parser.add_argument("--panels-only", action="store_true",
+                        help="Write the panels and exit without prompting. "
+                             "Scoring the corpus to stratify takes minutes; this "
+                             "keeps that out of the rating session.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seeds the stratified sampler so the same images are "
+                             "chosen on a re-run")
     args = parser.parse_args()
+
+    random.seed(args.seed)
 
     if args.calibrate:
         return run_calibration(args.treatable_max)
 
     directories = args.input_dir or [Path("data/crack_images"),
                                      Path("data/test_crack_detector")]
-    return run_labelling(directories, args.panel_dir, stratified=args.stratified)
+    return run_labelling(directories, args.panel_dir, stratified=args.stratified,
+                         panels_only=args.panels_only)
 
 
 if __name__ == "__main__":
