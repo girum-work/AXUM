@@ -43,6 +43,34 @@ explicitly. Whether the masks label fissures as crack decides whether a model
 learns "visually crack-like" or "structurally damaged", and those are different
 questions. Run --inspect to see what the masks actually contain.
 
+LARGER SOURCES, NOT YET ACQUIRED. 577 images is the binding constraint on this
+work, and it is self-imposed: the field has assembled far larger collections.
+Sizes below are as reported by the authors; every licence needs checking before
+use, and none of these links are scripted here because none were verified.
+
+    OmniCrack30k   30,000 images from 20+ datasets, 9 billion pixels, spanning
+                   asphalt, ceramic, concrete, masonry and steel. CVPR W 2024.
+                   ~52x our current data. The paper's own subtitle is "the
+                   Reasonable Effectiveness of Transfer Learning".
+    CrackSeg9k     ~9,000 images. Combines earlier datasets AND unifies their
+                   annotations, which is the MCS-vs-Stone331 convention problem
+                   solved properly rather than by our skeletonising workaround.
+    Khanh11k       ~11,200 images merged from 12 crack segmentation datasets.
+    Conglomerate   10,995 images from Virginia DOT bridge inspection reports.
+    S2DS           743 images labelled crack, spalling, corrosion,
+                   efflorescence, VEGETATION and control point. The vegetation
+                   class matters here: lichen is what the filter pipeline kept
+                   marking as crack, and this labels it as a separate thing.
+    Masonry        Photos of masonry structures with complex backgrounds --
+                   closer to Aksumite stelae than concrete or marble is.
+
+Syncrack (VISAPP 2022) is worth reading before trusting any of them: it shows
+manual crack annotations are systematically inaccurate at pixel level, and that
+the resulting learning bias measurably hinders pixel-accurate detection. That is
+the same effect measured here on Stone331, where the stone's own texture
+out-responds its annotated cracks (median ridge response inside a labelled crack
+0.057, against a 99th percentile of 0.102 on crack-free area).
+
 Usage:
     python scripts/fetch_crack_datasets.py --dataset mcs
     python scripts/fetch_crack_datasets.py --inspect
