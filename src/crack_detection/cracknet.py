@@ -53,12 +53,47 @@ class CrackNetConfig:
     pretrained: bool = True
     decoder_channels: tuple[int, ...] = (256, 128, 64, 32, 16)
     deep_supervision: bool = True
+    coord_attention: bool = True
+
+
+class CoordinateAttention(nn.Module):
+    """
+    Channel attention that keeps one spatial axis at a time.
+
+    Squeeze-and-excitation pools away both axes, which discards exactly what
+    matters here: a crack is defined by extent in one direction. Pooling H and W
+    separately lets a channel say "there is structure along this row" without
+    first collapsing where it is. Measured cost is 13,016 parameters, 0.05% of
+    the model, so it is cheaper to ablate than to argue about -- train with and
+    without --no-coord-attention and read the difference.
+    """
+
+    def __init__(self, channels: int, reduction: int = 32):
+        super().__init__()
+        hidden = max(8, channels // reduction)
+        self.reduce = nn.Conv2d(channels, hidden, 1)
+        self.norm = nn.BatchNorm2d(hidden)
+        self.activation = nn.Hardswish(inplace=True)
+        self.expand_h = nn.Conv2d(hidden, channels, 1)
+        self.expand_w = nn.Conv2d(hidden, channels, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, _, height, width = x.shape
+        along_h = x.mean(dim=3, keepdim=True)
+        along_w = x.mean(dim=2, keepdim=True).permute(0, 1, 3, 2)
+        pooled = self.activation(self.norm(self.reduce(
+            torch.cat([along_h, along_w], dim=2))))
+        part_h, part_w = torch.split(pooled, [height, width], dim=2)
+        gate_h = torch.sigmoid(self.expand_h(part_h))
+        gate_w = torch.sigmoid(self.expand_w(part_w.permute(0, 1, 3, 2)))
+        return x * gate_h * gate_w
 
 
 class DecoderBlock(nn.Module):
     """Upsample, concatenate the skip, then two convolutions."""
 
-    def __init__(self, in_channels: int, skip_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int,
+                 coord_attention: bool = False):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_channels + skip_channels, out_channels, 3, padding=1,
@@ -69,6 +104,8 @@ class DecoderBlock(nn.Module):
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
+        self.attention = (CoordinateAttention(out_channels)
+                          if coord_attention else nn.Identity())
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor | None) -> torch.Tensor:
         x = F.interpolate(x, scale_factor=2, mode="nearest")
@@ -77,7 +114,7 @@ class DecoderBlock(nn.Module):
             if x.shape[-2:] != skip.shape[-2:]:
                 x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
             x = torch.cat([x, skip], dim=1)
-        return self.block(x)
+        return self.attention(self.block(x))
 
 
 class CrackNet(nn.Module):
@@ -99,7 +136,8 @@ class CrackNet(nn.Module):
         blocks = []
         in_channels = 512
         for index, out_channels in enumerate(channels):
-            blocks.append(DecoderBlock(in_channels, skips[index], out_channels))
+            blocks.append(DecoderBlock(in_channels, skips[index], out_channels,
+                                       self.config.coord_attention))
             in_channels = out_channels
         self.decoder = nn.ModuleList(blocks)
 

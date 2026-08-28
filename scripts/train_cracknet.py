@@ -224,6 +224,10 @@ def main() -> int:
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--cl-weight", type=float, default=0.5)
     parser.add_argument("--no-pretrained", action="store_true")
+    parser.add_argument("--no-coord-attention", action="store_true",
+                        help="Ablate Coordinate Attention in the decoder")
+    parser.add_argument("--no-deep-supervision", action="store_true",
+                        help="Ablate the per-scale side outputs")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--amp", action="store_true")
@@ -261,7 +265,11 @@ def main() -> int:
                             num_workers=args.num_workers)
 
     device = torch.device(args.device)
-    model = CrackNet(CrackNetConfig(pretrained=not args.no_pretrained)).to(device)
+    model = CrackNet(CrackNetConfig(
+        pretrained=not args.no_pretrained,
+        coord_attention=not args.no_coord_attention,
+        deep_supervision=not args.no_deep_supervision,
+    )).to(device)
     print(f"parameters: {model.parameter_count():,}  device: {device}")
 
     positive = np.mean([float(train_set[i][1].mean())
