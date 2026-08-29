@@ -62,6 +62,20 @@ SOURCES = {
 GT_SPLITS = ("Train", "Val", "Test")
 
 
+def binarise(mask: np.ndarray) -> np.ndarray:
+    """
+    Threshold at half the mask's own maximum.
+
+    No fixed threshold works across these sets. MCS ships paletted masks whose
+    crack value is 38, so `> 127` empties them. khanhha ships JPEG masks, so
+    `> 0` promotes every compression artefact to crack -- measured on 60 of 60
+    sampled files, across 11,298 images. Half of the observed maximum is
+    correct for both, and for the plain 0/255 sets.
+    """
+    peak = int(mask.max())
+    return (mask > max(1, peak // 2)).astype(np.uint8)
+
+
 def discover_gt_layout(root: Path) -> dict[str, dict]:
     """Find datasets stored in the GT-CrackSeg directory convention."""
     found = {}
@@ -75,7 +89,7 @@ def discover_gt_layout(root: Path) -> dict[str, dict]:
                     "images": images, "masks": masks,
                     # Every one of these annotates the crack body; the
                     # centreline head takes their skeleton, as for MCS.
-                    "convention": "body"}
+                    "convention": "body", "split": split}
     return found
 
 
@@ -84,18 +98,37 @@ def index_by_stem(directory: Path) -> dict[str, Path]:
             if p.suffix.lower() in IMAGE_SUFFIXES}
 
 
-def collect_pairs() -> list[tuple[Path, Path, str]]:
+def collect_pairs() -> list[tuple[Path, Path, str, str]]:
+    """
+    Gather every pair, tagged with the split its own dataset assigned it.
+
+    Published splits are honoured rather than pooled and re-cut. Re-splitting
+    randomly is what lets patches from one source photograph land on both sides
+    of the divide, and it is the specific defect that makes a 99.98% accuracy
+    meaningless in the literature.
+    """
     pairs = []
+    seen: set[tuple[str, str]] = set()
     catalogue = dict(SOURCES)
     catalogue.update(discover_gt_layout(Path("data/crack_datasets")))
     for name, spec in catalogue.items():
         images = index_by_stem(spec["images"])
         masks = index_by_stem(spec["masks"])
         shared = sorted(set(images) & set(masks))
-        if shared:
-            print(f"  {name:28s} {len(shared):>6,d} pairs  ({spec['convention']})")
+        dataset = name.split("/")[0]
+        kept = 0
         for stem in shared:
-            pairs.append((images[stem], masks[stem], spec["convention"]))
+            # A handful of stems appear in two splits of the same dataset;
+            # keeping both would put one image on both sides.
+            if (dataset, stem) in seen:
+                continue
+            seen.add((dataset, stem))
+            pairs.append((images[stem], masks[stem], spec["convention"],
+                          spec.get("split", "unassigned")))
+            kept += 1
+        if shared:
+            print(f"  {name:28s} {kept:>6,d} pairs  ({spec['convention']}"
+                  f"{f', {len(shared) - kept} duplicate stems dropped' if kept != len(shared) else ''})")
     return pairs
 
 
@@ -120,7 +153,7 @@ class CrackPairs(Dataset):
         return len(self.pairs)
 
     def _targets(self, mask: np.ndarray, convention: str):
-        binary = (mask > 0).astype(np.uint8)
+        binary = binarise(mask)
         if convention == "body":
             # Skeletonise AFTER resizing, so the centreline of the resized body
             # is taken rather than a resized centreline, which would fragment.
@@ -140,7 +173,7 @@ class CrackPairs(Dataset):
         return thick.astype(np.float32), width, valid
 
     def __getitem__(self, index: int):
-        image_path, mask_path, convention = self.pairs[index]
+        image_path, mask_path, convention, _split = self.pairs[index]
         rng = (random if self.fixed_seed is None
                else random.Random(self.fixed_seed + index))
 
@@ -280,14 +313,24 @@ def main() -> int:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    split = max(1, int(len(pairs) * args.val_fraction))
-    val_pairs, train_pairs = pairs[:split], pairs[split:]
+    # Datasets that publish a split keep it. MCS and Stone331 do not, so those
+    # are cut here -- but only those.
+    assigned = [p for p in pairs if p[3] != "unassigned"]
+    unassigned = [p for p in pairs if p[3] == "unassigned"]
+    cut = max(1, int(len(unassigned) * args.val_fraction)) if unassigned else 0
+    train_pairs = [p for p in assigned if p[3] == "Train"] + unassigned[cut:]
+    val_pairs = [p for p in assigned if p[3] in ("Val", "Test")] + unassigned[:cut]
+    if not train_pairs or not val_pairs:
+        split = max(1, int(len(pairs) * args.val_fraction))
+        val_pairs, train_pairs = pairs[:split], pairs[split:]
+
     train_set = CrackPairs(train_pairs, args.size, augment=True)
     val_set = CrackPairs(val_pairs, args.size, augment=False, fixed_seed=1234)
 
-    bodies = sum(1 for _, _, c in train_pairs if c == "body")
-    print(f"{len(train_pairs)} train ({bodies} body, {len(train_pairs) - bodies} "
-          f"centreline) | {len(val_pairs)} val | {args.size}px full frames")
+    bodies = sum(1 for p in train_pairs if p[2] == "body")
+    print(f"{len(train_pairs):,} train ({bodies:,} body, "
+          f"{len(train_pairs) - bodies:,} centreline) | {len(val_pairs):,} val "
+          f"| {args.size}px full frames")
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers,

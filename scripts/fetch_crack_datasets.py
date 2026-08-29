@@ -222,14 +222,69 @@ def inspect(root: Path) -> int:
     return 0
 
 
+def import_bundle(archive: Path, root: Path) -> int:
+    """
+    Unpack the GT-CrackSeg bundle, which is a zip of per-dataset zips.
+
+    Zipped on macOS, so every archive carries a parallel __MACOSX/ tree of
+    AppleDouble resource forks named ._<file>. Those are not images, but they
+    sit next to the real ones and index_by_stem would happily pair them, so
+    they are dropped rather than extracted.
+    """
+    if not archive.exists():
+        print(f"No archive at {archive}", file=sys.stderr)
+        return 1
+
+    root.mkdir(parents=True, exist_ok=True)
+    staging = root / "_staging"
+    with zipfile.ZipFile(archive) as outer:
+        outer.extractall(staging)
+
+    inner_archives = sorted(staging.rglob("*.zip"))
+    if not inner_archives:
+        print(f"No inner archives inside {archive.name}", file=sys.stderr)
+        return 1
+
+    for inner in inner_archives:
+        name = inner.stem.lower()
+        destination = root / name
+        written = 0
+        with zipfile.ZipFile(inner) as zf:
+            for entry in zf.namelist():
+                if entry.endswith("/") or "__MACOSX" in entry:
+                    continue
+                if Path(entry).name.startswith(("._", ".DS_Store")):
+                    continue
+                # Drop the archive's own top-level folder so the dataset name
+                # is ours, not whatever case the zip happened to use.
+                relative = Path(*Path(entry).parts[1:])
+                if not relative.parts:
+                    continue
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(entry) as source, open(target, "wb") as out:
+                    shutil.copyfileobj(source, out)
+                written += 1
+        print(f"  {name:12s} {written:>7,d} files -> {destination}")
+
+    shutil.rmtree(staging, ignore_errors=True)
+    print(f"\nUnpacked into {root}. scripts/train_cracknet.py discovers the\n"
+          f"<name>/<Split>/{{img,anno}} layout automatically.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=["mcs"], help="Dataset to download")
     parser.add_argument("--inspect", action="store_true",
                         help="Report what the downloaded masks contain")
+    parser.add_argument("--import-bundle", type=Path,
+                        help="Unpack the GT-CrackSeg zip-of-zips download")
     parser.add_argument("--root", type=Path, default=DATA_ROOT)
     args = parser.parse_args()
 
+    if args.import_bundle:
+        return import_bundle(args.import_bundle, args.root)
     if args.inspect:
         return inspect(args.root / "mcs")
     if args.dataset == "mcs":
