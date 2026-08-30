@@ -126,7 +126,7 @@ class MarkerNavigator:
                         f"hfov {self.nominal_hfov_deg:.1f} deg")
         else:
             logger.warning("Marker nav running UNCALIBRATED: bearing only, "
-                           f"confidence capped at {UNCALIBRATED_CEILING}. "
+                           f"confidence scaled by {UNCALIBRATED_CEILING}. "
                            "Run scripts/calibrate_camera.py.")
 
         self._dictionary = cv2.aruco.getPredefinedDictionary(dictionary)

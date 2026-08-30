@@ -12,10 +12,11 @@ low" except by adding that check everywhere by hand. The supervisor
 Parallel at the root means one battery/comms check can interrupt any
 mission phase, instead of eight copies of the same check.
 
-HONESTY NOTE: the NAVIGATE phase has no real implementation behind it yet.
-ArUco docking was designed on paper but never built. `_action_navigate`
-below is an explicit, loud stub — it does not pretend to work. Do not
-wire real hardware calls into it without replacing the stub first.
+HONESTY NOTE: the NAVIGATE phase is now implemented -- ArUco docking, closed
+loop on the camera, in src/mission/docking.py. It refuses to run on an
+uncalibrated camera: bearing survives a guessed field of view, range does not,
+so an uncalibrated rover can face a marker but must not drive at it. Run
+scripts/calibrate_camera.py before expecting it to succeed on hardware.
 """
 
 from __future__ import annotations
@@ -43,6 +44,14 @@ from src.mission.behavior_tree import (
     Timeout,
     Traced,
     run_to_completion,
+)
+
+from config import (
+    CAMERA_CALIBRATION_PATH,
+    DOCK_ALIGN_TOLERANCE_DEG,
+    DOCK_MARKER_ID,
+    DOCK_STOP_DISTANCE_M,
+    MARKER_LENGTH_M,
 )
 
 # Firmware readiness flag — same meaning as in main_pipeline.py. Kept
@@ -177,32 +186,79 @@ def build_supervisor() -> Sequence:
 # main_pipeline.py) to reuse its existing hardware handles and analysis
 # calls, so this file doesn't duplicate that logic.
 
-def _action_navigate(bb: Blackboard) -> Status:
+def _make_action_navigate(pipeline) -> Any:
     """
-    STUB — ArUco docking navigation does not exist yet. This intentionally
-    fails loudly in live mode rather than silently pretending to work.
-    Dry-run passes through immediately since there's no physical robot to
-    navigate anyway.
+    ArUco docking, closed-loop on the camera.
 
-    IMPORTANT FOR WHOEVER IMPLEMENTS THIS FOR REAL: the supervisor's
-    front-collision guard and wheel-stall check (see _action_poll_health)
-    only activate when `bb.get("drive_active")` is True. This stub never
-    sets it, so those two safety checks are currently inert — not because
-    they're broken, but because nothing drives yet. The real navigate
-    implementation MUST set `bb.set("drive_active", True)` while issuing
-    DriveController commands and `False` once stopped/docked, or the
-    supervisor cannot protect the robot from a collision or a stalled
-    wheel during navigation at all.
+    Refuses to run uncalibrated. Bearing survives a guessed field of view and
+    range does not, so an uncalibrated camera can face a marker but cannot know
+    how far to drive at it. Failing here is recoverable; driving an unknown
+    distance is not. scripts/calibrate_camera.py produces the file.
+
+    `drive_active` is set for the duration and cleared in a finally, because
+    the supervisor's front-collision and wheel-stall guards only run while it
+    is true -- a path that leaves it false drives with both disabled.
     """
-    if bb.get("dry_run"):
-        bb.set("navigate_confidence", 1.0)
+    def _action_navigate(bb: Blackboard) -> Status:
+        if bb.get("dry_run"):
+            bb.set("navigate_confidence", 1.0)
+            return Status.SUCCESS
+
+        from src.mission.docking import DockingController
+        from src.mission.marker_nav import MarkerNavigator
+
+        navigator = MarkerNavigator(calibration=Path(CAMERA_CALIBRATION_PATH),
+                                    marker_length_m=MARKER_LENGTH_M)
+        if not navigator.calibrated:
+            logger.error(
+                f"NAVIGATE refuses to drive uncalibrated: no intrinsics at "
+                f"{CAMERA_CALIBRATION_PATH}. Run scripts/calibrate_camera.py. "
+                f"Detection works; range does not.")
+            bb.set("navigate_confidence", 0.0)
+            bb.set("last_abort_reason", "Camera not calibrated for docking")
+            return Status.FAILURE
+
+        hardware = bb.get("hardware")
+        camera = getattr(pipeline, "camera", None) or getattr(
+            pipeline, "_camera", None)
+        if camera is None or hardware is None:
+            logger.error("NAVIGATE has no camera or no drive controller")
+            bb.set("navigate_confidence", 0.0)
+            return Status.FAILURE
+
+        controller = DockingController(
+            navigator,
+            target_id=bb.get("dock_marker_id", DOCK_MARKER_ID),
+            stop_distance_m=DOCK_STOP_DISTANCE_M,
+            align_tolerance_deg=DOCK_ALIGN_TOLERANCE_DEG,
+            collision_distance_cm=FRONT_COLLISION_DISTANCE_CM,
+        )
+
+        bb.set("drive_active", True)
+        try:
+            result = controller.run(
+                frame_source=camera.capture_frame,
+                hardware=hardware,
+                front_distance=lambda: bb.get("front_distance_cm"),
+            )
+        finally:
+            bb.set("drive_active", False)
+            try:
+                hardware.stop()
+            except Exception:  # a failed stop must not mask the real error
+                logger.exception("Could not stop the drive after docking")
+
+        bb.set("navigate_confidence",
+               result.confidence if result.succeeded else 0.0)
+        bb.set("dock_state", result.state.value)
+        if not result.succeeded:
+            bb.set("last_abort_reason", f"Docking failed: {result.reason}")
+            logger.error(f"NAVIGATE failed: {result.reason}")
+            return Status.FAILURE
+        logger.info(f"NAVIGATE docked: {result.reason}")
         return Status.SUCCESS
-    logger.error(
-        "NAVIGATE phase has no real implementation — ArUco docking was "
-        "never built. Refusing to report SUCCESS on hardware."
-    )
-    bb.set("navigate_confidence", 0.0)
-    return Status.FAILURE
+
+    return _action_navigate
 
 
 def _make_action_pick(pipeline) -> Any:
@@ -434,7 +490,7 @@ def build_mission_tree(pipeline, object_id: str, sequence_number: int, recorder:
     in Timeout + Retry appropriate to that phase, PICK's outcome is
     confidence-gated, and TRANSFER is guarded by a safety invariant.
     """
-    navigate = Timeout("NavigateTimeout", Retry("NavigateRetry", ActionNode("Navigate", _action_navigate), max_attempts=2), timeout_seconds=20)
+    navigate = Timeout("NavigateTimeout", Retry("NavigateRetry", ActionNode("Navigate", _make_action_navigate(pipeline)), max_attempts=2), timeout_seconds=20)
     navigate = ConfidenceGate("NavigateConfidence", navigate, confidence_key="navigate_confidence", retry_below=0.6, abort_below=0.2)
 
     pick = Timeout("PickTimeout", Retry("PickRetry", ActionNode("Pick", _make_action_pick(pipeline)), max_attempts=3), timeout_seconds=15)

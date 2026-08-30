@@ -85,6 +85,20 @@ USE_AUTO_CANNY  = True
 CANNY_T1        = 50
 CANNY_T2        = 150
 
+# ─── Marker navigation ────────────────────────────────────────
+# Written by scripts/calibrate_camera.py. Absent, marker_nav still detects and
+# gives a bearing, but cannot give a range, and docking refuses to advance.
+CAMERA_CALIBRATION_PATH = "data/calibration/front_intrinsics.json"
+# Printed marker edge INCLUDING the black border, in metres. Measure it: an
+# error here scales every reported range by the same factor.
+MARKER_LENGTH_M = 0.08
+# Marker the rover docks against. tray_marker_id00.png is id 0.
+DOCK_MARKER_ID = 0
+# Range at which docking declares success, and bearing within which it may
+# start advancing rather than turning.
+DOCK_STOP_DISTANCE_M = 0.25
+DOCK_ALIGN_TOLERANCE_DEG = 6.0
+
 # ─── Heatmap ──────────────────────────────────────────────────
 GRID_ROWS       = 10
 GRID_COLS       = 15
