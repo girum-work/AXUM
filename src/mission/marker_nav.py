@@ -114,6 +114,8 @@ class MarkerNavigator:
         self.camera_matrix: np.ndarray | None = None
         self.distortion: np.ndarray | None = None
         self.reprojection_error: float | None = None
+        self.calibration_resolution: tuple[int, int] | None = None
+        self._resolution_warned = False
 
         if calibration and Path(calibration).exists():
             record = json.loads(Path(calibration).read_text(encoding="utf-8"))
@@ -121,6 +123,10 @@ class MarkerNavigator:
             self.distortion = np.array(record["distortion"], dtype=np.float64)
             self.reprojection_error = float(record.get("reprojection_error_px", 0.0))
             self.nominal_hfov_deg = float(record.get("hfov_deg", nominal_hfov_deg))
+            resolution = record.get("resolution")
+            if resolution:
+                self.calibration_resolution = (int(resolution[0]),
+                                               int(resolution[1]))
             logger.info(f"Marker nav calibrated: reprojection "
                         f"{self.reprojection_error:.3f}px, "
                         f"hfov {self.nominal_hfov_deg:.1f} deg")
@@ -140,12 +146,32 @@ class MarkerNavigator:
     def calibrated(self) -> bool:
         return self.camera_matrix is not None
 
+    def _check_resolution(self, width: int, height: int) -> None:
+        """
+        Intrinsics belong to one camera at one resolution.
+
+        Focal length and principal point are in pixels, so a stream reconfigured
+        from 640x480 to 1280x960 silently halves every reported range. Warned
+        once rather than every frame, since docking observes continuously.
+        """
+        if (not self.calibration_resolution or self._resolution_warned
+                or (width, height) == self.calibration_resolution):
+            return
+        self._resolution_warned = True
+        logger.error(
+            f"Frame is {width}x{height} but calibration was measured at "
+            f"{self.calibration_resolution[0]}x{self.calibration_resolution[1]}. "
+            f"Ranges from this are wrong by the ratio. Recalibrate at the "
+            f"resolution the rover actually streams.")
+
     def detect(self, frame: np.ndarray) -> list[MarkerSighting]:
         """Every marker in the frame, strongest first."""
         if frame is None or frame.size == 0:
             return []
         gray = (frame if frame.ndim == 2
                 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        height, width = gray.shape[:2]
+        self._check_resolution(width, height)
         corner_sets, ids, _rejected = self._detector.detectMarkers(gray)
         if ids is None or len(ids) == 0:
             return []

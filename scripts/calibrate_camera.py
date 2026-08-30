@@ -65,7 +65,7 @@ def find_corners(gray: np.ndarray, columns: int, rows: int):
     return cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), CORNER_CRITERIA)
 
 
-def capture(camera: int, columns: int, rows: int, out_dir: Path,
+def capture(grab, columns: int, rows: int, out_dir: Path,
             wanted: int) -> int:
     """
     Save frames in which the board is fully visible.
@@ -73,37 +73,59 @@ def capture(camera: int, columns: int, rows: int, out_dir: Path,
     Headless by necessity: requirements.txt pins opencv-python-headless, so
     there is no imshow anywhere in this codebase. Frames are graded as they
     arrive and the accepted ones written to disk, with progress on stdout.
+
+    Args:
+        grab: Callable returning the next frame, or None when exhausted.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    stream = cv2.VideoCapture(camera)
-    if not stream.isOpened():
-        print(f"Cannot open camera {camera}", file=sys.stderr)
-        return 1
-
     print(f"Looking for a {columns}x{rows} inner-corner board. "
           f"Move and TILT it between captures; {wanted} accepted views wanted.")
     accepted, seen, last_saved = 0, 0, -999
-    try:
-        while accepted < wanted:
-            ok, frame = stream.read()
-            if not ok:
-                break
-            seen += 1
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners = find_corners(gray, columns, rows)
-            # Space captures out, or 30 near-identical frames get saved while
-            # the board sits still and the fit learns nothing from any of them.
-            if corners is not None and seen - last_saved >= 15:
-                path = out_dir / f"calib_{accepted:03d}.png"
-                cv2.imwrite(str(path), frame)
-                accepted += 1
-                last_saved = seen
-                print(f"  [{accepted}/{wanted}] saved {path.name}")
-    finally:
-        stream.release()
+    while accepted < wanted:
+        frame = grab()
+        if frame is None:
+            break
+        seen += 1
+        gray = (frame if frame.ndim == 2
+                else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        corners = find_corners(gray, columns, rows)
+        # Space captures out, or 30 near-identical frames get saved while
+        # the board sits still and the fit learns nothing from any of them.
+        if corners is not None and seen - last_saved >= 15:
+            path = out_dir / f"calib_{accepted:03d}.png"
+            cv2.imwrite(str(path), frame)
+            accepted += 1
+            last_saved = seen
+            print(f"  [{accepted}/{wanted}] saved {path.name}")
 
     print(f"\n{accepted} views in {out_dir}")
     return 0 if accepted else 1
+
+
+def make_grabber(camera: int | None, stream_url: str | None):
+    """
+    Frame source for either a local device or one of the rover's cameras.
+
+    Intrinsics belong to one camera at one resolution. The rover looks through
+    an ESP32-CAM or the Pi IR-CUT camera, both HTTP streams -- calibrating the
+    laptop webcam instead would produce a confident, wrong range on hardware,
+    which is the exact failure marker_nav refuses to make.
+    """
+    if stream_url:
+        from src.arm.controller import CameraInterface
+
+        interface = CameraInterface(stream_url=stream_url)
+        return interface.capture_frame, lambda: None
+
+    stream = cv2.VideoCapture(camera if camera is not None else 0)
+    if not stream.isOpened():
+        raise RuntimeError(f"Cannot open camera {camera}")
+
+    def grab():
+        ok, frame = stream.read()
+        return frame if ok else None
+
+    return grab, stream.release
 
 
 def calibrate(image_dir: Path, columns: int, rows: int, square_m: float,
@@ -192,7 +214,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", action="store_true",
                         help="Grab views from a camera first")
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument("--camera", type=int, default=None,
+                        help="Local device index. Use --stream-url for the "
+                             "rover's own cameras.")
+    parser.add_argument("--stream-url",
+                        help="ESP32_CAM_URL or PI_CAM_URL from config.py. "
+                             "Calibrate the camera that will actually dock.")
     parser.add_argument("--images", type=Path,
                         default=Path("data/calibration/front"))
     parser.add_argument("--columns", type=int, default=9,
@@ -207,8 +234,21 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.capture:
-        code = capture(args.camera, args.columns, args.rows, args.images,
-                       args.views)
+        if args.camera is None and not args.stream_url:
+            print("Pass --stream-url for a rover camera, or --camera for a "
+                  "local one. Intrinsics do not transfer between cameras.",
+                  file=sys.stderr)
+            return 1
+        try:
+            grab, release = make_grabber(args.camera, args.stream_url)
+        except RuntimeError as error:
+            print(error, file=sys.stderr)
+            return 1
+        try:
+            code = capture(grab, args.columns, args.rows, args.images,
+                           args.views)
+        finally:
+            release()
         if code:
             return code
     return calibrate(args.images, args.columns, args.rows,
