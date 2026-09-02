@@ -23,8 +23,9 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, responses, events=None):
+    def __init__(self, responses, events=None, post_responses=None):
         self.responses = list(responses)
+        self.post_responses = list(post_responses or [])
         self.events = events if events is not None else []
         self.urls = []
 
@@ -32,6 +33,15 @@ class FakeSession:
         self.urls.append(url)
         self.events.append(("http", url))
         response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def post(self, url, json=None, timeout=None):
+        self.events.append(("post", url, json["locked"]))
+        if not self.post_responses:
+            raise requests.ConnectionError("no such endpoint")
+        response = self.post_responses.pop(0)
         if isinstance(response, Exception):
             raise response
         return response
@@ -65,10 +75,17 @@ def test_capture_retries_and_preserves_jpeg_bytes(tmp_path: Path, monkeypatch) -
 def test_turntable_preflights_pi_before_photo_command(tmp_path: Path) -> None:
     events = []
     jpeg = b"\xff\xd8frame\xff\xd9"
-    session = FakeSession([
-        FakeResponse(payload={"ok": True}),
-        FakeResponse(content=jpeg, content_type="image/jpeg"),
-    ], events)
+    session = FakeSession(
+        [
+            FakeResponse(payload={"ok": True}),
+            FakeResponse(content=jpeg, content_type="image/jpeg"),
+        ],
+        events,
+        post_responses=[
+            FakeResponse(payload={"ok": True, "controls": {"AeEnable": False}}),
+            FakeResponse(payload={"ok": True, "controls": {"AeEnable": True}}),
+        ],
+    )
     camera = CameraInterface(
         "http://pi.local:5001/stream",
         require_status=True,
@@ -83,6 +100,33 @@ def test_turntable_preflights_pi_before_photo_command(tmp_path: Path) -> None:
     turntable = TurntableController(arduino=FakeArduino(), camera=camera)
     frames = turntable.capture_rotation_set("TEST", photo_count=1, output_dir=tmp_path)
     assert len(frames) == 1
-    assert events[0] == ("http", camera.status_url)
-    assert events[1] == ("arduino", "PHOTO")
     assert (tmp_path / "TEST_000.jpg").read_bytes() == jpeg
+    assert events == [
+        ("http", camera.status_url),
+        ("post", camera.lock_url, True),
+        ("arduino", "PHOTO"),
+        ("http", camera.capture_url),
+        ("post", camera.lock_url, False),
+    ]
+
+
+def test_turntable_captures_when_the_camera_cannot_lock(tmp_path: Path) -> None:
+    """The ESP32-CAM has no /lock, and a drifting set still beats no set."""
+    events = []
+    jpeg = b"\xff\xd8frame\xff\xd9"
+    session = FakeSession([FakeResponse(content=jpeg, content_type="image/jpeg")], events)
+    camera = CameraInterface("http://esp32.local:81/stream", session=session)
+
+    class FakeArduino:
+        def send_command(self, command, expect_prefix=None):
+            events.append(("arduino", command))
+            return f"OK:{command.split(':', 1)[0]}"
+
+    turntable = TurntableController(arduino=FakeArduino(), camera=camera)
+    frames = turntable.capture_rotation_set("TEST", photo_count=1, output_dir=tmp_path)
+    assert len(frames) == 1
+    assert (tmp_path / "TEST_000.jpg").read_bytes() == jpeg
+    # It tried once and did not then release a lock it never took.
+    assert [event for event in events if event[0] == "post"] == [
+        ("post", camera.lock_url, True),
+    ]

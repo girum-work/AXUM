@@ -237,7 +237,7 @@ def _make_action_navigate(pipeline) -> Any:
         bb.set("drive_active", True)
         try:
             result = controller.run(
-                frame_source=camera.capture_frame,
+                frame_source=camera.capture_array,
                 hardware=hardware,
                 front_distance=lambda: bb.get("front_distance_cm"),
             )
