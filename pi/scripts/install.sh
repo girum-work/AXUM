@@ -43,13 +43,33 @@ else
   exit 1
 fi
 
-if command -v rpicam-hello >/dev/null 2>&1; then
-  rpicam-hello --list-cameras
-elif command -v libcamera-hello >/dev/null 2>&1; then
-  libcamera-hello --list-cameras
-else
+CAMERA_TOOL="$(command -v rpicam-hello || command -v libcamera-hello || true)"
+if [[ -z "${CAMERA_TOOL}" ]]; then
   echo "Camera utilities are unavailable after package installation." >&2
   exit 1
+fi
+
+# --list-cameras exits 0 whether or not a sensor answered, so the exit code
+# says nothing. The presence of an "0 : <sensor>" line is the real signal.
+CAMERA_LIST="$("${CAMERA_TOOL}" --list-cameras 2>&1 || true)"
+echo "${CAMERA_LIST}"
+if ! grep -qE '^[[:space:]]*[0-9]+[[:space:]]*:' <<<"${CAMERA_LIST}"; then
+  if [[ "${AXUM_ALLOW_NO_CAMERA:-0}" == "1" ]]; then
+    echo
+    echo "WARNING: no camera sensor detected. Installing the service anyway" >&2
+    echo "because AXUM_ALLOW_NO_CAMERA=1. It will run degraded and /status will" >&2
+    echo "return 503 until a sensor is attached." >&2
+    SKIP_VERIFY=1
+  else
+    echo
+    echo "No camera sensor detected on the CSI port." >&2
+    echo "Power the Pi down before reseating the ribbon: contacts toward the" >&2
+    echo "board, blue tab toward the USB sockets. Re-run once" >&2
+    echo "'${CAMERA_TOOL##*/} --list-cameras' lists a sensor." >&2
+    echo "To install the service before the camera arrives, re-run with" >&2
+    echo "AXUM_ALLOW_NO_CAMERA=1." >&2
+    exit 1
+  fi
 fi
 
 if [[ ! -x "${VENV_DIR}/bin/python3" ]]; then
@@ -74,12 +94,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now avahi-daemon.service
 sudo systemctl enable --now "${SERVICE_NAME}.service"
 
-"${VENV_DIR}/bin/python3" "${PI_DIR}/verify_pi.py" --url "http://127.0.0.1:5001"
+if [[ "${SKIP_VERIFY:-0}" == "1" ]]; then
+  echo
+  echo "Skipping verification: there is no camera to verify against."
+else
+  "${VENV_DIR}/bin/python3" "${PI_DIR}/verify_pi.py" --url "http://127.0.0.1:5001"
+fi
 
 HOSTNAME_VALUE="$(hostname)"
 IP_VALUE="$(hostname -I | awk '{print $1}')"
 echo
-echo "AXUM Pi camera service installed and verified."
+echo "AXUM Pi camera service installed."
 echo "Service: sudo systemctl status ${SERVICE_NAME}"
 echo "Logs:    journalctl -u ${SERVICE_NAME} -f"
 echo "Host:    ${HOSTNAME_VALUE}.local"

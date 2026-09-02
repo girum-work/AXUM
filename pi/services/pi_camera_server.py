@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import atexit
+import io
 import logging
 import os
 import signal
@@ -13,7 +14,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import cv2
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
+from PIL import Image
 
 try:
     from picamera2 import Picamera2
@@ -24,6 +26,16 @@ except ImportError:
     PICAMERA_AVAILABLE = False
 
 LOGGER = logging.getLogger("axum.pi.camera")
+
+# EXIF tags AliceVision reads when deciding a starting focal length.
+EXIF_MAKE = 0x010F
+EXIF_MODEL = 0x0110
+EXIF_IFD = 0x8769
+EXIF_FOCAL_LENGTH = 0x920A
+EXIF_FOCAL_LENGTH_35MM = 0xA405
+EXIF_PIXEL_X_DIMENSION = 0xA002
+EXIF_PIXEL_Y_DIMENSION = 0xA003
+FULL_FRAME_WIDTH_MM = 36.0
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw = os.getenv(name)
@@ -43,6 +55,15 @@ def _env_optional_int(name: str) -> int | None:
         raise ValueError(f"{name} must be positive or 'auto'")
     return value
 
+def _env_optional_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw in (None, "", "auto", "AUTO"):
+        return None
+    value = float(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
 @dataclass(frozen=True)
 class CameraSettings:
     """Runtime settings supplied through the systemd environment file."""
@@ -51,6 +72,10 @@ class CameraSettings:
     capture_width: int | None = _env_optional_int("AXUM_CAPTURE_WIDTH")
     capture_height: int | None = _env_optional_int("AXUM_CAPTURE_HEIGHT")
     capture_quality: int = _env_int("AXUM_CAPTURE_JPEG_QUALITY", 96)
+    # No default: the lens is not something the sensor can report, and an
+    # invented focal length is worse than none because photogrammetry would
+    # then trust it instead of solving for it.
+    lens_focal_mm: float | None = _env_optional_float("AXUM_LENS_FOCAL_MM")
     stream_width: int = _env_int("AXUM_STREAM_WIDTH", 640)
     stream_height: int = _env_int("AXUM_STREAM_HEIGHT", 480)
     stream_fps: int = _env_int("AXUM_STREAM_FPS", 10)
@@ -65,6 +90,49 @@ class CameraSettings:
                 raise ValueError(f"{name} must be between 1 and 100")
         if (self.capture_width is None) != (self.capture_height is None):
             raise ValueError("AXUM_CAPTURE_WIDTH and AXUM_CAPTURE_HEIGHT must be set together")
+
+def _sensor_width_mm(properties: dict[str, Any]) -> float | None:
+    """
+    Physical width of the pixel array, from what libcamera reports.
+
+    Measured rather than configured: UnitCellSize is in nanometres per pixel,
+    so the sensor's own numbers give the millimetres photogrammetry needs to
+    turn a lens focal length into pixels.
+    """
+    cell = properties.get("UnitCellSize")
+    array = properties.get("PixelArraySize")
+    if not cell or not array:
+        return None
+    try:
+        return float(cell[0]) * float(array[0]) / 1_000_000.0
+    except (TypeError, ValueError, IndexError):
+        return None
+
+def _exif_bytes(model: str | None, size: tuple[int, int],
+                focal_mm: float | None, sensor_width_mm: float | None) -> bytes | None:
+    """
+    EXIF block carrying the optics, or None when the lens is unknown.
+
+    Without a focal length AliceVision falls back to a default field of view
+    and silently reconstructs at the wrong scale; with it, every image also
+    groups into one intrinsic instead of one per file.
+    """
+    if focal_mm is None:
+        return None
+    exif = Image.Exif()
+    exif[EXIF_MAKE] = "RaspberryPi"
+    exif[EXIF_MODEL] = model or "unknown"
+    sub: dict[int, Any] = {
+        EXIF_FOCAL_LENGTH: focal_mm,
+        EXIF_PIXEL_X_DIMENSION: int(size[0]),
+        EXIF_PIXEL_Y_DIMENSION: int(size[1]),
+    }
+    # The 35mm equivalent is the fallback AliceVision uses when its sensor
+    # database has no entry for the camera -- and it never has one for these.
+    if sensor_width_mm:
+        sub[EXIF_FOCAL_LENGTH_35MM] = round(focal_mm * FULL_FRAME_WIDTH_MM / sensor_width_mm)
+    exif[EXIF_IFD] = sub
+    return exif.tobytes()
 
 class CameraService:
     """Own one Picamera2 instance configured for simultaneous still and preview streams."""
@@ -88,7 +156,9 @@ class CameraService:
         self._stream_thread: threading.Thread | None = None
         self.capture_size: tuple[int, int] | None = None
         self.sensor_resolution: tuple[int, int] | None = None
+        self.sensor_width_mm: float | None = None
         self.camera_model: str | None = None
+        self._locked_controls: dict[str, Any] | None = None
 
     @property
     def ready(self) -> bool:
@@ -112,11 +182,15 @@ class CameraService:
             )
             assert capture_size[0] is not None and capture_size[1] is not None
 
+            # "RGB888" yields numpy arrays in BGR order -- picamera2 names
+            # formats by memory layout, the reverse of the channel order you
+            # index. BGR is what OpenCV and the rest of this codebase expect;
+            # "BGR888" here would swap red and blue in every frame.
             config = camera.create_video_configuration(
-                main={"size": capture_size, "format": "BGR888"},
+                main={"size": capture_size, "format": "RGB888"},
                 lores={
                     "size": (self.settings.stream_width, self.settings.stream_height),
-                    "format": "BGR888",
+                    "format": "RGB888",
                 },
                 controls={"FrameRate": self.settings.stream_fps},
                 buffer_count=4,
@@ -130,7 +204,9 @@ class CameraService:
             self._camera = camera
             self.capture_size = (int(capture_size[0]), int(capture_size[1]))
             self.sensor_resolution = sensor_resolution
+            self.sensor_width_mm = _sensor_width_mm(properties)
             self.camera_model = str(properties.get("Model") or properties.get("CameraModel") or "unknown")
+            self._locked_controls = None
             self._last_error = None
             self._stop_event.clear()
             self._stream_thread = threading.Thread(
@@ -178,14 +254,68 @@ class CameraService:
             raise RuntimeError("OpenCV failed to encode camera frame as JPEG")
         return encoded.tobytes()
 
+    def _encode_still(self, frame: Any) -> bytes:
+        """Encode a capture through Pillow, which can carry EXIF; cv2 cannot."""
+        height, width = frame.shape[:2]
+        exif = _exif_bytes(self.camera_model, (width, height),
+                           self.settings.lens_focal_mm, self.sensor_width_mm)
+        if exif is None:
+            return self._encode(frame, self.settings.capture_quality)
+        buffer = io.BytesIO()
+        Image.fromarray(frame[:, :, ::-1]).save(
+            buffer, format="JPEG", quality=self.settings.capture_quality, exif=exif)
+        return buffer.getvalue()
+
     def capture_jpeg(self) -> bytes:
         if self._camera is None:
             raise RuntimeError(self._last_error or "camera is not ready")
         with self._camera_lock:
             frame = self._camera.capture_array("main")
-        jpeg = self._encode(frame, self.settings.capture_quality)
+        jpeg = self._encode_still(frame)
         self._capture_count += 1
         return jpeg
+
+    def set_capture_lock(self, locked: bool) -> dict[str, Any]:
+        """
+        Freeze or release exposure and white balance.
+
+        A turntable set is one scene photographed 36 times. Left on auto, the
+        camera re-meters as the object turns, so brightness and colour drift
+        across the set -- which weakens feature matching and gives a blotchy
+        texture. Locking samples the state the camera has already converged on
+        (the preview thread has been metering continuously) and pins it.
+
+        Returns:
+            The controls applied, for the caller to log or verify.
+        """
+        if self._camera is None:
+            raise RuntimeError(self._last_error or "camera is not ready")
+        if not locked:
+            controls: dict[str, Any] = {"AeEnable": True, "AwbEnable": True}
+            with self._camera_lock:
+                self._camera.set_controls(controls)
+            self._locked_controls = None
+            LOGGER.info("Exposure and white balance released to auto")
+            return controls
+
+        with self._camera_lock:
+            metadata = self._camera.capture_metadata() or {}
+        controls = {"AeEnable": False, "AwbEnable": False}
+        for key in ("ExposureTime", "AnalogueGain", "ColourGains"):
+            if metadata.get(key) is not None:
+                controls[key] = metadata[key]
+        missing = [k for k in ("ExposureTime", "AnalogueGain", "ColourGains")
+                   if k not in controls]
+        if missing:
+            # Disabling auto without pinning the value leaves the camera on
+            # whatever it last chose, which is not a lock anyone can rely on.
+            raise RuntimeError(
+                f"Camera did not report {', '.join(missing)}; cannot lock exposure")
+        with self._camera_lock:
+            self._camera.set_controls(controls)
+        self._locked_controls = controls
+        LOGGER.info("Exposure and white balance locked: %s", controls)
+        return controls
 
     def _stream_worker(self) -> None:
         interval = 1.0 / self.settings.stream_fps
@@ -234,6 +364,11 @@ class CameraService:
             "camera_ready": self._camera is not None,
             "camera_model": self.camera_model,
             "sensor_resolution": list(self.sensor_resolution) if self.sensor_resolution else None,
+            "sensor_width_mm": self.sensor_width_mm,
+            "lens_focal_mm": self.settings.lens_focal_mm,
+            "exif_optics": self.settings.lens_focal_mm is not None,
+            "capture_locked": self._locked_controls is not None,
+            "locked_controls": self._locked_controls,
             "capture_resolution": list(self.capture_size) if self.capture_size else None,
             "capture_jpeg_quality": self.settings.capture_quality,
             "stream_resolution": [self.settings.stream_width, self.settings.stream_height],
@@ -291,6 +426,18 @@ def create_app(camera_service: CameraService | None = None) -> Flask:
         payload = service.status_payload()
         return jsonify(payload), 200 if payload["ok"] else 503
 
+    @app.post("/lock")
+    def lock() -> Response:
+        body = request.get_json(silent=True) or {}
+        if "locked" not in body:
+            return jsonify({"ok": False, "error": "body must contain 'locked'"}), 400
+        try:
+            controls = service.set_capture_lock(bool(body["locked"]))
+        except Exception as exc:
+            LOGGER.exception("Exposure lock failed")
+            return jsonify({"ok": False, "error": str(exc)}), 503
+        return jsonify({"ok": True, "locked": bool(body["locked"]), "controls": controls})
+
     return app
 
 
@@ -321,237 +468,3 @@ if __name__ == "__main__":
     except Exception:
         LOGGER.error("Starting HTTP service in degraded mode; /status will return 503")
     app.run(host=SETTINGS.host, port=SETTINGS.port, threaded=True, use_reloader=False)
-#!/usr/bin/env python3
-"""
-AXUM Rover — Pi 4 IR-CUT Camera Server
-========================================
-WHAT:  Runs on the Raspberry Pi 4 and exposes the same HTTP API as the
-       original ESP32-CAM: /capture (JPEG still) and /stream (MJPEG).
-       The laptop pipeline (CameraInterface in controller.py) connects here
-       exactly as it connected to the ESP32-CAM — no changes needed there.
-WHY:   Keeps CameraInterface's API stable across camera hardware changes.
-       The Pi IR-CUT module gives higher resolution, adjustable focus, and
-       built-in IR illumination for low-light scanning.
-
-DEPLOY: Copy this file to the Pi, install dependencies, then run:
-    pip install flask picamera2
-    python3 pi_camera_server.py
-
-UPDATE config.py on the laptop:
-    PI_CAM_URL     = "http://<pi-ip>:5001/stream"
-    PI_CAM_CAPTURE = "http://<pi-ip>:5001/capture"
-
-HARDWARE: Raspberry Pi 4 + Pi IR-CUT Night Vision Camera Module (OV5647).
-    The IR-CUT filter is controlled via GPIO — HIGH = daylight, LOW = IR mode.
-    Default: daylight mode (IR-CUT filter in).
-"""
-
-import io
-import time
-import threading
-from pathlib import Path
-
-from flask import Flask, Response, jsonify, request
-
-# picamera2 is only available on the Pi — import is guarded for development
-try:
-    from picamera2 import Picamera2
-    from picamera2.encoders import MJPEGEncoder
-    from picamera2.outputs import FileOutput
-    PICAMERA_AVAILABLE = True
-except ImportError:
-    PICAMERA_AVAILABLE = False
-
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
-    GPIO_AVAILABLE = False
-
-# ── Configuration ─────────────────────────────────────────────
-CAPTURE_WIDTH   = 1280
-CAPTURE_HEIGHT  = 960
-STREAM_WIDTH    = 640
-STREAM_HEIGHT   = 480
-STREAM_FPS      = 10
-IR_CUT_PIN      = 17    # BCM pin controlling the IR-CUT filter relay
-SERVER_PORT     = 5001  # must match PI_CAM_URL port in laptop config.py
-
-app = Flask(__name__)
-
-# ── Camera singleton ──────────────────────────────────────────
-_camera: "Picamera2 | None" = None
-_camera_lock = threading.Lock()
-_stream_frame: bytes = b""
-_stream_lock  = threading.Lock()
-
-
-def get_camera() -> "Picamera2":
-    """
-    Initialise and return the shared Picamera2 instance.
-
-    WHY singleton: picamera2 does not allow multiple open instances; all
-    routes must share one object.
-    """
-    global _camera
-    if _camera is None:
-        if not PICAMERA_AVAILABLE:
-            raise RuntimeError(
-                "picamera2 not available — run this script on a Raspberry Pi 4"
-            )
-        cam = Picamera2()
-        # Main (still) configuration: full resolution
-        still_cfg  = cam.create_still_configuration(
-            main={"size": (CAPTURE_WIDTH, CAPTURE_HEIGHT), "format": "BGR888"},
-        )
-        cam.configure(still_cfg)
-        cam.start()
-        time.sleep(1.0)   # allow auto-exposure to settle
-        _camera = cam
-    return _camera
-
-
-# ── IR-CUT filter control ─────────────────────────────────────
-
-def _setup_gpio() -> None:
-    """Set up GPIO for IR-CUT filter relay if available."""
-    if GPIO_AVAILABLE:
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(IR_CUT_PIN, GPIO.OUT)
-        GPIO.output(IR_CUT_PIN, GPIO.HIGH)   # default: daylight (filter IN)
-
-
-def set_ir_mode(ir_on: bool) -> None:
-    """
-    Switch between IR and daylight mode.
-
-    Args:
-        ir_on: True = IR mode (filter OUT, see in dark with IR LEDs).
-               False = daylight mode (filter IN, accurate colour).
-    """
-    if GPIO_AVAILABLE:
-        GPIO.output(IR_CUT_PIN, GPIO.LOW if ir_on else GPIO.HIGH)
-
-
-# ── Streaming thread ──────────────────────────────────────────
-
-def _stream_worker() -> None:
-    """
-    Background thread: continuously captures MJPEG frames into _stream_frame.
-
-    WHY separate thread: keeps /stream response latency low regardless of
-    /capture calls hitting the same camera.
-    """
-    global _stream_frame
-    cam = get_camera()
-    # Reconfigure for lower-res video (keeps CPU load manageable on Pi 4)
-    video_cfg = cam.create_video_configuration(
-        main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "BGR888"},
-        controls={"FrameRate": STREAM_FPS},
-    )
-    cam.configure(video_cfg)
-    cam.start()
-
-    while True:
-        buf = io.BytesIO()
-        cam.capture_file(buf, format="jpeg")
-        buf.seek(0)
-        with _stream_lock:
-            _stream_frame = buf.read()
-        time.sleep(1.0 / STREAM_FPS)
-
-
-# ── Routes ────────────────────────────────────────────────────
-
-@app.route("/capture")
-def capture() -> Response:
-    """
-    Capture one JPEG still at full resolution.
-
-    Returns:
-        JPEG image with Content-Type image/jpeg.
-        Compatible with CameraInterface.capture_frame() in controller.py.
-    """
-    with _camera_lock:
-        cam = get_camera()
-        buf = io.BytesIO()
-        cam.capture_file(buf, format="jpeg")
-        buf.seek(0)
-        jpeg = buf.read()
-
-    return Response(jpeg, mimetype="image/jpeg")
-
-
-def _mjpeg_generator():
-    """Yield MJPEG multipart frames from the background stream thread."""
-    while True:
-        with _stream_lock:
-            frame = _stream_frame
-        if frame:
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n"
-                + frame +
-                b"\r\n"
-            )
-        time.sleep(1.0 / STREAM_FPS)
-
-
-@app.route("/stream")
-def stream() -> Response:
-    """
-    MJPEG stream endpoint.
-
-    Compatible with CameraInterface.stream_endpoint() in controller.py.
-    Point a browser or OpenCV VideoCapture at this URL to preview.
-    """
-    return Response(
-        _mjpeg_generator(),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
-    )
-
-
-@app.route("/ir", methods=["POST"])
-def ir_mode() -> Response:
-    """
-    Switch IR-CUT filter.
-
-    Body JSON: {"ir": true}  → IR mode (dark scanning)
-               {"ir": false} → daylight mode (colour accurate)
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    ir_on = bool(data.get("ir", False))
-    set_ir_mode(ir_on)
-    return jsonify({"ok": True, "ir_mode": ir_on})
-
-
-@app.route("/status")
-def status() -> Response:
-    """Health check — laptop pipeline calls this to confirm the server is up."""
-    return jsonify({
-        "ok": True,
-        "picamera_available": PICAMERA_AVAILABLE,
-        "gpio_available": GPIO_AVAILABLE,
-        "resolution": f"{CAPTURE_WIDTH}x{CAPTURE_HEIGHT}",
-        "stream_resolution": f"{STREAM_WIDTH}x{STREAM_HEIGHT}",
-    })
-
-
-# ── Entry point ───────────────────────────────────────────────
-
-if __name__ == "__main__":
-    _setup_gpio()
-    if PICAMERA_AVAILABLE:
-        # Pre-warm camera before accepting requests
-        get_camera()
-        # Start background stream thread
-        t = threading.Thread(target=_stream_worker, daemon=True)
-        t.start()
-        print(f"AXUM Pi Camera Server running on port {SERVER_PORT}")
-        print(f"  Still capture : http://<pi-ip>:{SERVER_PORT}/capture")
-        print(f"  MJPEG stream  : http://<pi-ip>:{SERVER_PORT}/stream")
-        print(f"  IR mode toggle: POST http://<pi-ip>:{SERVER_PORT}/ir")
-    else:
-        print("WARNING: picamera2 not found — running in stub mode (status only)")
-
-    app.run(host="0.0.0.0", port=SERVER_PORT, threaded=True)

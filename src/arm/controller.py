@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 import serial
@@ -31,6 +31,9 @@ from config import (
     TURNTABLE_SETTLE_MS,
     TURNTABLE_STEPS,
 )
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 class ArduinoSerial:
@@ -639,6 +642,7 @@ class CameraInterface:
         self.session = session or requests.Session()
         self.capture_url = self._capture_url_from_stream(stream_url)
         self.status_url = self._endpoint_from_stream(stream_url, "status")
+        self.lock_url = self._endpoint_from_stream(stream_url, "lock")
 
     def status(self) -> dict[str, Any]:
         """Return camera-service health data or raise when it is not ready."""
@@ -684,9 +688,49 @@ class CameraInterface:
             output_path.write_bytes(response.content)
         return response.content
 
+    def capture_array(self) -> "np.ndarray":
+        """
+        Capture one frame decoded to a BGR image.
+
+        The endpoint returns JPEG bytes, but everything vision-side --
+        marker_nav, docking, calibration -- indexes and converts arrays.
+
+        Returns:
+            Decoded frame, height x width x 3.
+        """
+        import cv2
+        import numpy as np
+
+        payload = self.capture_frame()
+        frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8),
+                             cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(
+                f"Camera returned {len(payload)} bytes that do not decode as "
+                f"an image ({self.capture_url})")
+        return frame
+
     def stream_endpoint(self) -> str:
         """Return the MJPEG stream URL for dashboards or manual checks."""
         return self.stream_url
+
+    def set_capture_lock(self, locked: bool) -> dict[str, Any]:
+        """
+        Freeze or release the camera's exposure and white balance.
+
+        Only the Pi camera service implements this; the ESP32-CAM has no such
+        endpoint and will raise.
+
+        Args:
+            locked: True to pin the current settings, False to restore auto.
+
+        Returns:
+            The service's response, including the controls it applied.
+        """
+        response = self.session.post(self.lock_url, json={"locked": bool(locked)},
+                                     timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
 
     @staticmethod
     def _capture_url_from_stream(stream_url: str) -> str:
@@ -758,14 +802,33 @@ class TurntableController:
         degrees = 360.0 / photo_count
         frames: list[CapturedFrame] = []
 
-        for index in range(photo_count):
-            if index > 0:
-                self.rotate_degrees(degrees)
-                time.sleep(TURNTABLE_SETTLE_MS / 1000.0)
-            self.trigger_photo()
-            path = output_dir / f"{object_id}_{index:03d}.jpg"
-            self.camera.capture_frame(path)
-            frames.append(CapturedFrame(path=path, index=index, angle_degrees=index * degrees))
+        # One scene photographed photo_count times: on auto, the camera
+        # re-meters as the object turns and the set drifts in brightness and
+        # colour, which costs feature matches and blotches the texture.
+        # A camera that cannot lock still gives a usable set, just a worse one.
+        locked = False
+        try:
+            self.camera.set_capture_lock(True)
+            locked = True
+        except Exception as exc:
+            logger.warning(f"Exposure not locked for {object_id}; the set may "
+                           f"drift in brightness and colour: {exc}")
+
+        try:
+            for index in range(photo_count):
+                if index > 0:
+                    self.rotate_degrees(degrees)
+                    time.sleep(TURNTABLE_SETTLE_MS / 1000.0)
+                self.trigger_photo()
+                path = output_dir / f"{object_id}_{index:03d}.jpg"
+                self.camera.capture_frame(path)
+                frames.append(CapturedFrame(path=path, index=index, angle_degrees=index * degrees))
+        finally:
+            if locked:
+                try:
+                    self.camera.set_capture_lock(False)
+                except Exception:
+                    logger.exception("Could not return the camera to auto exposure")
 
         return frames
 
