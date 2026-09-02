@@ -42,6 +42,7 @@ from config import (
     MESHROOM_CACHE_DIR,
     MESHROOM_OBJ_PRIORITY,
     MESHROOM_PATH,
+    MESHROOM_PIPELINE,
     MESHROOM_TIMEOUT_SEC,
     MESH_DIR,
     MESH_PUBLISH_MTL,
@@ -535,6 +536,7 @@ def run_meshroom_batch(
     photo_dir: Path,
     output_dir: Path,
     *,
+    pipeline: str = MESHROOM_PIPELINE,
     timeout_sec: int = MESHROOM_TIMEOUT_SEC,
 ) -> Path:
     """
@@ -548,6 +550,8 @@ def run_meshroom_batch(
         photo_dir:   Directory containing .jpg/.jpeg/.png photos
                      (case-insensitive extension match)
         output_dir:  Meshroom output/cache directory
+        pipeline:    Meshroom template name; "photogrammetryDraft" skips the
+                     dense stage and returns a sparse cloud only
         timeout_sec: Subprocess timeout in seconds
 
     Returns:
@@ -593,14 +597,14 @@ def run_meshroom_batch(
         cmd = [
             str(exe),
             "--batch",
-            "-p", "photogrammetryDraft",
+            "-p", pipeline,
             f"input={photo_dir.resolve()}",
             f"output={output_dir.resolve()}",
         ]
     else:
         cmd = [
             str(exe),
-            "--pipeline", "photogrammetryDraft",
+            "--pipeline", pipeline,
             "--input", str(photo_dir.resolve()),
             "--output", str(output_dir.resolve()),
         ]
@@ -655,6 +659,7 @@ def run_photogrammetry(
     *,
     skip_meshroom: bool = False,
     export_dir: Path | None = None,
+    pipeline: str = MESHROOM_PIPELINE,
 ) -> MeshPublishResult:
     """
     Full photogrammetry stage for one catalogue object.
@@ -667,6 +672,7 @@ def run_photogrammetry(
         object_id:     Catalogue object ID
         skip_meshroom: If True, only publish from existing export/cache
         export_dir:    Optional explicit Meshroom export directory
+        pipeline:      Meshroom template name
 
     Returns:
         ``MeshPublishResult`` ready for catalogue registration
@@ -677,7 +683,7 @@ def run_photogrammetry(
 
     if export_dir is None and not skip_meshroom and photos.exists():
         try:
-            run_meshroom_batch(photos, cache_dir)
+            run_meshroom_batch(photos, cache_dir, pipeline=pipeline)
         except FileNotFoundError as exc:
             logger.warning(f"Meshroom unavailable for {object_id}: {exc}")
         except (RuntimeError, TimeoutError) as exc:
