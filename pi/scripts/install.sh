@@ -92,7 +92,10 @@ sudo chmod 0644 "${SERVICE_FILE}"
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now avahi-daemon.service
-sudo systemctl enable --now "${SERVICE_NAME}.service"
+sudo systemctl enable "${SERVICE_NAME}.service"
+# restart, not enable --now: on a re-run after git pull the unit is already
+# active, and --now would leave the previous code running.
+sudo systemctl restart "${SERVICE_NAME}.service"
 
 if [[ "${SKIP_VERIFY:-0}" == "1" ]]; then
   echo
