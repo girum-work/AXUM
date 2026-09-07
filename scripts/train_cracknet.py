@@ -98,7 +98,7 @@ def index_by_stem(directory: Path) -> dict[str, Path]:
             if p.suffix.lower() in IMAGE_SUFFIXES}
 
 
-def collect_pairs() -> list[tuple[Path, Path, str, str]]:
+def collect_pairs() -> list[tuple[Path, Path, str, str, str]]:
     """
     Gather every pair, tagged with the split its own dataset assigned it.
 
@@ -124,12 +124,62 @@ def collect_pairs() -> list[tuple[Path, Path, str, str]]:
                 continue
             seen.add((dataset, stem))
             pairs.append((images[stem], masks[stem], spec["convention"],
-                          spec.get("split", "unassigned")))
+                          spec.get("split", "unassigned"), dataset))
             kept += 1
         if shared:
             print(f"  {name:28s} {kept:>6,d} pairs  ({spec['convention']}"
                   f"{f', {len(shared) - kept} duplicate stems dropped' if kept != len(shared) else ''})")
     return pairs
+
+
+def split_pairs(pairs, val_fraction: float, seed: int):
+    """
+    Train / validation / test, holding every published test image back.
+
+    Both the stopping epoch and the decision threshold are chosen on the
+    validation set. Scoring on a set that also drove those choices reports the
+    maximum over that search, not a held-out result -- and the reader's 0.89
+    this gets compared against was measured blind, so the comparison would be
+    rigged in the model's favour.
+
+    Datasets publishing Train/Test but no Val get validation carved out of
+    Train, never out of Test, so every source informs selection without
+    spending the held-out set.
+    """
+    by_dataset: dict[str, list] = {}
+    for pair in pairs:
+        by_dataset.setdefault(pair[4], []).append(pair)
+
+    train, val, test = [], [], []
+    for dataset in sorted(by_dataset):
+        items = by_dataset[dataset]
+        rng = random.Random(f"{seed}:{dataset}")
+
+        loose = [p for p in items if p[3] == "unassigned"]
+        if loose:
+            rng.shuffle(loose)
+            cut = max(1, int(len(loose) * val_fraction))
+            val.extend(loose[:cut])
+            test.extend(loose[cut:2 * cut])
+            train.extend(loose[2 * cut:])
+            continue
+
+        published_train = [p for p in items if p[3] == "Train"]
+        published_val = [p for p in items if p[3] == "Val"]
+        test.extend(p for p in items if p[3] == "Test")
+        # khanhha publishes 1 validation image against 9,603 training ones and
+        # cracktree publishes none, so selection would be driven by the small
+        # datasets and reported on the large one. Top such cases up from Train,
+        # never from Test. A genuine published split (tut 14%, deepcrack 37%)
+        # is left alone.
+        if len(published_val) < 0.05 * len(published_train):
+            rng.shuffle(published_train)
+            shortfall = int(len(published_train) * val_fraction) - len(published_val)
+            published_val = published_val + published_train[:shortfall]
+            published_train = published_train[shortfall:]
+        train.extend(published_train)
+        val.extend(published_val)
+    return train, val, test
 
 
 class CrackPairs(Dataset):
@@ -173,7 +223,7 @@ class CrackPairs(Dataset):
         return thick.astype(np.float32), width, valid
 
     def __getitem__(self, index: int):
-        image_path, mask_path, convention, _split = self.pairs[index]
+        image_path, mask_path, convention, _split, _dataset = self.pairs[index]
         rng = (random if self.fixed_seed is None
                else random.Random(self.fixed_seed + index))
 
@@ -225,11 +275,18 @@ def cell_occupancy(mask: np.ndarray, divisions: int = 8,
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, tolerance: int = 3) -> dict:
-    """Pixel P/R/F1 swept over thresholds, plus cell-level F1."""
+def evaluate(model, loader, device, tolerance: int = 3,
+             threshold: float | None = None) -> dict:
+    """
+    Pixel P/R/F1 swept over thresholds, plus cell-level F1.
+
+    Passing a threshold pins the sweep to that one value, for scoring a
+    held-out set at the operating point validation already chose.
+    """
     model.eval()
+    sweep = THRESHOLDS if threshold is None else (threshold,)
     # [matched predicted, total predicted, matched truth, total truth]
-    counts = {t: [0.0, 0.0, 0.0, 0.0] for t in THRESHOLDS}
+    counts = {t: [0.0, 0.0, 0.0, 0.0] for t in sweep}
     cell_scores = []
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                        (2 * tolerance + 1, 2 * tolerance + 1))
@@ -241,7 +298,7 @@ def evaluate(model, loader, device, tolerance: int = 3) -> dict:
             truth_binary = (truth[index, 0] > 0.5).astype(np.uint8)
             slack = cv2.dilate(truth_binary, kernel)
             truth_total = float(np.count_nonzero(truth_binary))
-            for t in THRESHOLDS:
+            for t in sweep:
                 predicted = (probability[index, 0] > t).astype(np.uint8)
                 counts[t][0] += float(np.count_nonzero(predicted & slack))
                 counts[t][1] += float(np.count_nonzero(predicted))
@@ -313,30 +370,28 @@ def main() -> int:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    # Datasets that publish a split keep it. MCS and Stone331 do not, so those
-    # are cut here -- but only those.
-    assigned = [p for p in pairs if p[3] != "unassigned"]
-    unassigned = [p for p in pairs if p[3] == "unassigned"]
-    cut = max(1, int(len(unassigned) * args.val_fraction)) if unassigned else 0
-    train_pairs = [p for p in assigned if p[3] == "Train"] + unassigned[cut:]
-    val_pairs = [p for p in assigned if p[3] in ("Val", "Test")] + unassigned[:cut]
+    train_pairs, val_pairs, test_pairs = split_pairs(
+        pairs, args.val_fraction, args.split_seed)
     if not train_pairs or not val_pairs:
-        split = max(1, int(len(pairs) * args.val_fraction))
-        val_pairs, train_pairs = pairs[:split], pairs[split:]
+        print("Split produced no train or validation pairs.", file=sys.stderr)
+        return 1
 
     train_set = CrackPairs(train_pairs, args.size, augment=True)
     val_set = CrackPairs(val_pairs, args.size, augment=False, fixed_seed=1234)
+    test_set = CrackPairs(test_pairs, args.size, augment=False, fixed_seed=1234)
 
     bodies = sum(1 for p in train_pairs if p[2] == "body")
     print(f"{len(train_pairs):,} train ({bodies:,} body, "
           f"{len(train_pairs) - bodies:,} centreline) | {len(val_pairs):,} val "
-          f"| {args.size}px full frames")
+          f"| {len(test_pairs):,} held-out test | {args.size}px full frames")
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers,
                               drop_last=len(train_set) > args.batch_size)
     val_loader = DataLoader(val_set, batch_size=args.batch_size,
                             num_workers=args.num_workers)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size,
+                             num_workers=args.num_workers)
 
     device = torch.device(args.device)
     model = CrackNet(CrackNetConfig(
@@ -369,6 +424,7 @@ def main() -> int:
     run = f"cracknet_{args.tag}" if args.tag else "cracknet"
     args.out.mkdir(parents=True, exist_ok=True)
     best, history = 0.0, []
+    best_threshold, best_state = 0.5, None
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -399,20 +455,39 @@ def main() -> int:
 
         if metrics["cell_f1"] > best:
             best = metrics["cell_f1"]
+            best_threshold = metrics["best_threshold"]
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in model.state_dict().items()}
             torch.save({"state_dict": model.state_dict(),
                         "config": vars(model.config),
                         "cell_f1": best,
                         "threshold": metrics["best_threshold"]},
                        args.out / f"{run}.pth")
 
+    # Scored once, on images that drove neither the stopping epoch nor the
+    # threshold. This is the only number comparable to the reader's 0.89.
+    test_metrics = {}
+    if test_pairs and best_state is not None:
+        model.load_state_dict(best_state)
+        test_metrics = evaluate(model, test_loader, device,
+                                threshold=best_threshold)
+        print(f"\nheld-out test | cell F1 {test_metrics['cell_f1']:.3f} "
+              f"| pixel F1 {test_metrics['best_f1']:.3f} @{best_threshold:.1f}")
+
     log = Path("logs/crack_segmenter") / f"{run}_training.json"
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(json.dumps(
         {"epochs": args.epochs, "images": len(pairs),
-         "parameters": model.parameter_count(), "best_cell_f1": best,
+         "train_images": len(train_pairs), "val_images": len(val_pairs),
+         "test_images": len(test_pairs),
+         "parameters": model.parameter_count(),
+         "best_val_cell_f1": best,
+         "selected_threshold": best_threshold,
+         "test": test_metrics,
          "reader_cell_f1": 0.89, "filter_cell_f1": 0.40,
          "history": history}, indent=2), encoding="utf-8")
-    print(f"\nbest cell F1 {best:.3f} (reader 0.89, filter pipeline 0.40)")
+    print(f"best validation cell F1 {best:.3f} "
+          f"(selection); reader 0.89, filter pipeline 0.40")
     return 0
 
 
