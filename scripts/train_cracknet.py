@@ -16,15 +16,30 @@ reader has over the filters (cell-level F1 0.89 against 0.40).
 
 Reported alongside pixel metrics is cell-level F1 on the same 8x8 grid the
 reader was scored on, so the model's number is directly comparable to 0.89.
+That figure comes from the held-out test split, which drives neither the
+stopping epoch nor the threshold; the validation figure is selection-biased and
+is logged separately.
 
-Usage:
+Usage (GPU box -- requirements.txt pins CPU-only torch on Windows, so install
+the CUDA build first):
+    pip install torch==2.5.1 torchvision==0.20.1 \
+        --index-url https://download.pytorch.org/whl/cu121
+
     python scripts/train_cracknet.py --epochs 150 --batch-size 8 --amp
+
+Loading one sample costs ~100 ms and the cost is diffuse -- JPEG decode,
+augmentation copies, skeletonisation and dtype casts, no single hot spot worth
+caching. At 9,483 training images that is ~16 min per epoch on one worker
+against ~2-3 min of GPU compute, so the default worker count matters more than
+any micro-optimisation. For short smoke runs pass --num-workers 0; spawning
+workers costs more than it saves on a few hundred small images.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -350,7 +365,10 @@ def main() -> int:
     parser.add_argument("--no-global-attention", action="store_true",
                         help="Ablate bottleneck self-attention")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 1),
+                        help="Loading one sample costs ~100 ms and is diffuse "
+                             "-- decode, augment, skeletonise, no single hot "
+                             "spot -- so a GPU starves without workers.")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split-seed", type=int, default=42)
@@ -385,15 +403,21 @@ def main() -> int:
           f"{len(train_pairs) - bodies:,} centreline) | {len(val_pairs):,} val "
           f"| {len(test_pairs):,} held-out test | {args.size}px full frames")
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers,
-                              drop_last=len(train_set) > args.batch_size)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size,
-                            num_workers=args.num_workers)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size,
-                             num_workers=args.num_workers)
-
     device = torch.device(args.device)
+
+    # Workers are kept alive between epochs because Windows spawns rather than
+    # forks, so re-importing torch every epoch costs more than it saves.
+    loader_options = {
+        "num_workers": args.num_workers,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": args.num_workers > 0,
+    }
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
+                              drop_last=len(train_set) > args.batch_size,
+                              **loader_options)
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, **loader_options)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, **loader_options)
+
     model = CrackNet(CrackNetConfig(
         pretrained=not args.no_pretrained,
         coord_attention=not args.no_coord_attention,
