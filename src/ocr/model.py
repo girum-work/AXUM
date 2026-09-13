@@ -592,7 +592,7 @@ def load_ocr_model(path: Path) -> GeezOCRModel:
     if not path.exists():
         raise FileNotFoundError(f"OCR model not found: {path}")
 
-    checkpoint  = torch.load(path, map_location='cpu')
+    checkpoint  = torch.load(path, map_location='cpu', weights_only=True)
     num_classes = checkpoint.get('num_classes', len(GEEZ_CHARSET))
     saved_charset = checkpoint.get('charset')
     if saved_charset is not None and list(saved_charset) != list(GEEZ_CHARSET):
