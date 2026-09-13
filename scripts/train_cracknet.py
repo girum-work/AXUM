@@ -375,6 +375,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--tag", default="")
     parser.add_argument("--out", type=Path, default=Path("models/crack"))
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from the last epoch checkpoint for this --tag/--out, if present")
     args = parser.parse_args()
 
     pairs = collect_pairs()
@@ -447,10 +449,48 @@ def main() -> int:
 
     run = f"cracknet_{args.tag}" if args.tag else "cracknet"
     args.out.mkdir(parents=True, exist_ok=True)
-    best, history = 0.0, []
+    best_path = args.out / f"{run}.pth"
+    latest_path = args.out / f"{run}_latest.pth"
+    best, history, start_epoch = 0.0, [], 1
     best_threshold, best_state = 0.5, None
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume and latest_path.exists():
+        # Self-produced checkpoint (optimizer/scheduler state, RNG tuples) -- not
+        # third-party data, so weights_only=False is safe here. Loaded to CPU first --
+        # the RNG state tensor must stay CPU-side; load_state_dict below moves the
+        # model/optimizer tensors to `device` regardless of where they were loaded from.
+        checkpoint = torch.load(latest_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(checkpoint["state_dict"])
+        optimiser.load_state_dict(checkpoint["optimizer_state_dict"])
+        best = checkpoint["best_cell_f1"]
+        history = checkpoint["history"]
+        start_epoch = checkpoint["epoch"] + 1
+        rng = checkpoint["rng_state"]
+        random.setstate(rng["random"])
+        np.random.set_state(rng["numpy"])
+        torch.set_rng_state(rng["torch"])
+        if torch.cuda.is_available() and rng["torch_cuda"] is not None:
+            torch.cuda.set_rng_state_all(rng["torch_cuda"])
+        if checkpoint.get("epochs") == args.epochs:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        else:
+            # OneCycleLR's total-steps count is baked into its state dict; restoring it
+            # under a different --epochs would overrun or undershoot the schedule, so
+            # the freshly-constructed scheduler above is left in place instead.
+            print(f"warning: --epochs {args.epochs} differs from the "
+                  f"{checkpoint.get('epochs')} this checkpoint's OneCycleLR schedule "
+                  f"was built for -- LR schedule restarts from its beginning")
+        if best_path.exists():
+            # Best-so-far weights live in the separate best-only checkpoint rather than
+            # duplicated into the latest one; needed for the held-out test pass below.
+            best_checkpoint = torch.load(best_path, map_location="cpu", weights_only=True)
+            best_state = best_checkpoint["state_dict"]
+            best_threshold = best_checkpoint["threshold"]
+        print(f"resumed from epoch {checkpoint['epoch']} (best cell F1 so far {best:.3f})")
+    elif args.resume:
+        print(f"--resume given but no checkpoint at {latest_path}; starting from epoch 1")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         running = 0.0
         started = time.time()
@@ -487,6 +527,23 @@ def main() -> int:
                         "cell_f1": best,
                         "threshold": metrics["best_threshold"]},
                        args.out / f"{run}.pth")
+
+        # Every epoch, not just improvements, so --resume loses at most one epoch.
+        torch.save({"state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimiser.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "epoch": epoch,
+                    "epochs": args.epochs,
+                    "best_cell_f1": best,
+                    "history": history,
+                    "rng_state": {
+                        "random": random.getstate(),
+                        "numpy": np.random.get_state(),
+                        "torch": torch.get_rng_state(),
+                        "torch_cuda": (torch.cuda.get_rng_state_all()
+                                       if torch.cuda.is_available() else None),
+                    }},
+                   latest_path)
 
     # Scored once, on images that drove neither the stopping epoch nor the
     # threshold. This is the only number comparable to the reader's 0.89.
