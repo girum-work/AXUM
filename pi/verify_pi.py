@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import shutil
 import sys
 import threading
@@ -13,6 +14,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 import requests
+from PIL import Image
+from PIL.ExifTags import IFD, Base
 
 
 @dataclass
@@ -147,6 +150,37 @@ def verify_service(base_url: str, captures: int, timeout: float) -> list[CheckRe
         return True, f"Still={dimensions}; preview={stream_result.get('dimensions')}", False
 
     results.append(run_check("Concurrent stream and still", concurrent_check))
+
+    def optics_check() -> tuple[bool, str, bool]:
+        response = session.get(f"{base_url}/capture", timeout=timeout)
+        response.raise_for_status()
+        optics = Image.open(io.BytesIO(response.content)).getexif().get_ifd(IFD.Exif)
+        focal = optics.get(Base.FocalLength)
+        if not status_payload.get("exif_optics"):
+            return True, ("no lens focal length set, so reconstruction will guess "
+                          "the field of view -- set AXUM_LENS_FOCAL_MM"), True
+        if not focal:
+            return False, "status claims EXIF optics but the JPEG carries none", False
+        return True, (f"focal {float(focal):.2f}mm, "
+                      f"35mm equivalent {optics.get(Base.FocalLengthIn35mmFilm)}"), False
+
+    results.append(run_check("EXIF optics", optics_check))
+
+    def lock_check() -> tuple[bool, str, bool]:
+        """Exposure drift only shows up in the finished mesh, so prove it here."""
+        response = session.post(f"{base_url}/lock", json={"locked": True}, timeout=timeout)
+        payload = response.json()
+        if response.status_code != 200:
+            return False, str(payload.get("error") or payload), False
+        try:
+            reported = session.get(f"{base_url}/status", timeout=timeout).json()
+        finally:
+            session.post(f"{base_url}/lock", json={"locked": False}, timeout=timeout)
+        if not reported.get("capture_locked"):
+            return False, "lock accepted but /status does not report it", False
+        return True, f"pinned {', '.join(sorted(payload.get('controls') or {}))}", False
+
+    results.append(run_check("Exposure and white balance lock", lock_check))
     results.append(CheckResult(
         "IR-cut control",
         True,

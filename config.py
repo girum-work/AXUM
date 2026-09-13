@@ -29,10 +29,12 @@ ESP32_CAM_URL   = "http://192.168.1.105:81/stream"   # update after first boot
 # Pi 4 IR-CUT camera server (see services/pi/pi_camera_server.py). Not wired
 # as CameraInterface's default yet -- whether the Pi camera is meant to
 # fully replace ESP32_CAM_URL as primary, or run alongside it, is still an
-# open integration question (see integration report). Update the IP after
-# first boot, same as ESP32_CAM_URL above.
-PI_CAM_URL      = "http://<pi-ip>:5001/stream"
-PI_CAM_CAPTURE  = "http://<pi-ip>:5001/capture"
+# open integration question (see integration report).
+# Named, not numbered: the rover changes networks and therefore IP. This is
+# the Tailscale MagicDNS name, which resolves anywhere both ends have
+# internet. On a shared LAN with no internet, axum-rover.local works instead.
+PI_CAM_URL      = "http://axum-rover:5001/stream"
+PI_CAM_CAPTURE  = "http://axum-rover:5001/capture"
 CAMERA_WIDTH    = 640
 CAMERA_HEIGHT   = 480
 CAMERA_FPS      = 10
@@ -213,6 +215,11 @@ MESHROOM_OBJ_PRIORITY = (
     "mesh.obj",
 )
 MESHROOM_TIMEOUT_SEC = 7200                          # 2 h max per reconstruction
+# Meshroom template name. "photogrammetryDraft" stops after the sparse SfM
+# point cloud -- minutes rather than hours, but it produces no dense surface,
+# so there is nothing to measure a crack against. Use it to confirm a capture
+# set solves at all, then re-run on "photogrammetry" for the real mesh.
+MESHROOM_PIPELINE    = "photogrammetry"
 MESH_SHOW_PLACEHOLDER = True                         # dashboard fallback when no mesh
 MESH_TEXTURE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr")
 # Renderable model files, in preference order. OBJ first so a Meshroom

@@ -9,7 +9,7 @@
 
 AXUM is a **WRO 2026 Future Innovators** robot that picks up Ethiopian cultural artefacts, scans them (camera, UV, mechanical sensors), runs **local AI on a laptop** (Ge'ez OCR, crack detection, classification, conservation advice), optionally performs physical conservation actions, and outputs a **museum PDF catalogue + 3D meshes + live dashboard**.
 
-Software runs on **Windows, CPU-only, no cloud**. Hardware is controlled by an **Arduino Mega** over USB serial; the **ESP32-CAM** streams video over WiFi.
+Software runs on **Windows, CPU-only, no cloud**. Hardware is controlled by an **Arduino Mega** over USB serial. Cameras are on WiFi, not serial: a **Raspberry Pi 4** runs the scan camera as an HTTP service (`pi/services/pi_camera_server.py`), and two **ESP32-CAMs** cover the undercarriage and arm angle.
 
 **Deadline:** National selection, mid-August 2026. **Team:** 2 people.
 
@@ -26,22 +26,25 @@ Think of four layers:
 └───────────────────────────┬─────────────────────────────┘
                             │ emit_event()
 ┌───────────────────────────▼─────────────────────────────┐
-│  MISSION PIPELINE (NOT BUILT YET)                       │
-│  src/pipeline/main_pipeline.py — orchestrates everything│
+│  MISSION PIPELINE + BEHAVIOUR TREE (built)              │
+│  src/pipeline/main_pipeline.py, src/mission/*.py        │
 └───────────────────────────┬─────────────────────────────┘
                             │ calls
 ┌───────────────────────────▼─────────────────────────────┐
-│  ANALYSIS MODULES (mostly built)                        │
-│  OCR, cracks, salt, classifier, treatment, catalogue  │
+│  ANALYSIS MODULES (built)                               │
+│  OCR, restoration, cracks, salt, treatment, catalogue   │
 └───────────────────────────┬─────────────────────────────┘
                             │ commands
 ┌───────────────────────────▼─────────────────────────────┐
-│  HARDWARE LAYER (NOT BUILT YET)                         │
-│  src/arm/controller.py — serial to Arduino              │
+│  HARDWARE LAYER (built, UNVERIFIED ON HARDWARE)         │
+│  src/arm/controller.py — Arduino serial + HTTP cameras  │
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Key insight:** Most AI/analysis code is written. What's missing is the **glue** — hardware controller + mission state machine — that ties modules together for a live demo.
+**Key insight:** the glue exists now — controller, mission tree, behaviour tree and
+docking are all written and unit-tested. What is missing is **physical verification**:
+no motor has moved under software control, and no camera has been calibrated. Every
+remaining P0 is something you do with your hands, not your keyboard.
 
 ---
 
@@ -66,21 +69,24 @@ See `CODEBASE_WALKTHROUGH.md` § config.py for line-by-line explanation.
 
 | Folder | Purpose | Status |
 |--------|---------|--------|
-| `src/ocr/` | Ge'ez OCR model + training + LLM restoration | ✅ Substantial |
-| `src/object_detection/` | Tray detection + MobileNet + YOLO + coins | ✅ Substantial |
-| `src/crack_detection/` | OpenCV crack finder | ✅ Done |
-| `src/imaging/` | Salt mapper only | ⚠️ Partial (multispectral/stereo missing) |
-| `src/analysis/` | Treatment advisor + fragment grouper | ✅ Done |
+| `src/ocr/` | Ge'ez OCR + corpus + damage + restoration transformer | ✅ Trained |
+| `src/object_detection/` | Tray detection + MobileNet + YOLO + coins + nav | ✅ Code done, ❌ untrained |
+| `src/crack_detection/` | Ridge detector + U-Net segmenter + CrackNet | ⚠️ Detector done, CrackNet untrained |
+| `src/imaging/` | Salt mapper, photometric stereo, multispectral | ⚠️ Gated on `FIRMWARE_LED_READY` |
+| `src/analysis/` | Treatment advisor, fragment grouper, fragility clock | ✅ Done |
 | `src/catalogue/` | JSON records + PDF generator + service | ✅ Done |
-| `src/photogrammetry/` | Meshroom wrapper + demo meshes | ✅ Done |
-| `src/pipeline/` | Mesh stage only | ⚠️ `main_pipeline.py` missing |
+| `src/photogrammetry/` | Meshroom wrapper + demo meshes | ⚠️ Never run on own captures |
+| `src/pipeline/` | `main_pipeline.py` + `mesh_stage.py` | ⚠️ Live scan stage deliberately blocked |
+| `src/mission/` | Behaviour tree, mission tree, marker nav, docking | ✅ Built + tested, ❌ never driven |
 | `src/dashboard/` | Flask-SocketIO UI | ✅ Done |
-| `src/arm/` | Hardware control | ❌ `controller.py` missing |
+| `src/arm/` | Arduino serial, arm, turntable, camera HTTP | ✅ Built, ❌ untested on hardware |
+| `pi/` | Pi camera service + installer + verifier | ✅ Deployed, ❌ no sensor attached |
 | `scripts/` | Training, download, verification, demos | ✅ Many scripts |
-| `arduino/` | Mega + ESP32 firmware | ✅ Written, untested |
-| `data/` | Datasets, KB, demo catalogue | ✅ OCR data ready |
-| `models/` | Trained weights | ❌ Empty — must train |
-| `scans/` | Photos + meshes | ⚠️ Demo meshes only |
+| `arduino/` | `axum-rover` (Mega) + `esp32_cam` | ✅ Written, untested |
+| `data/` | Datasets, KB, demo catalogue | ✅ OCR + 14,080 crack pairs |
+| `models/` | Trained weights | ⚠️ OCR + restoration only |
+| `scans/` | Photos + meshes | ⚠️ Demo + one benchmark set |
+| `tests/` | pytest suite | ✅ 52 passing |
 
 ---
 
@@ -109,50 +115,77 @@ The **`ObjectRecord`** dataclass (`catalogue/records.py`) accumulates fields as 
 
 | Model | Architecture | Training script | Weights |
 |-------|---------------|-----------------|---------|
-| Ge'ez OCR | CNN + BiLSTM + CTC | `scripts/train_ocr.py` | ❌ Not trained |
-| LLM restoration | Qwen2.5-1.5B (fine-tune on Colab) | `scripts/export_restoration_colab.py` | ❌ Not fine-tuned |
+| Ge'ez OCR | CNN + BiLSTM + CTC | `scripts/train_ocr.py` | ✅ `models/geez_ocr.pth` |
+| Ge'ez restoration | 4.88M char transformer, dual head | `scripts/train_restoration.py` | ✅ **54.41% top-1** |
+| Amharic restoration | same | `scripts/train_restoration.py` | ✅ **62.34% top-1** |
+| Crack segmenter | U-Net | `scripts/train_crack_segmenter.py` | ⚠️ probe weights only — see below |
+| CrackNet | ResNet-34 U-Net + clDice | `scripts/train_cracknet.py` | ❌ Not trained |
 | Artefact classifier | MobileNetV2 | `scripts/train_classifier.py` | ❌ Not trained |
 | YOLO artefacts | YOLO11n | `scripts/train_yolo11.py` | ❌ Not trained |
 | YOLO coins | YOLO11n (7 classes) | `scripts/train_yolo11_coins.py` | ❌ Not trained |
-| Crack detector | OpenCV only | None | N/A |
+| LLM translation | local LM Studio, no fine-tune | — | N/A |
+
+**Read the crack weights carefully.** `models/crack/crack_mcs.pth` and
+`crack_stone331.pth` exist, but they came from **3- and 6-epoch CPU probes** at
+`--base-channels 16` against a default of 80, with loss still falling. The F1 figures
+in `logs/crack_segmenter/*_training.json` are not results and must not be quoted —
+`best_f1` is written by any run length, however short.
+
+**Restoration is the one genuinely finished AI result.** Ge'ez 54.41% top-1 against a
+27.73% n-gram baseline is 1.96×, reproduced on two different machines within 0.14 pts.
 
 **Dataset status:**
 - OCR: **ready** (~79,684 images in `data/geez_characters/`)
+- Restoration: **ready** (AGE-Dataset, 17.5k verse-aligned triples)
+- Cracks: **ready** — 14,080 pairs after the GT-CrackSeg import, was 577
 - Classifier: **short** (~228 accepted images; need 500+)
 - Coins: **not collected** to target
 
-**Highest ROI task:** Train OCR first — dataset is ready, code is ready, only CPU time is needed.
+**Highest ROI task:** train CrackNet. The data is there, the architecture is written,
+and classical filtering has been benchmarked to its ceiling (MCS F1 0.346 vs a human
+reader's 0.89 on the same task).
 
 ---
 
-## 7. Critical missing files (blockers)
+## 7. Critical blockers
 
-### P0 — Must build before live robot demo
+### P0 — physical, not software. None of these can be fixed by writing code.
 
-#### `src/arm/controller.py`
-Expected exports (already imported in `src/arm/__init__.py`):
-- **`ArduinoSerial`** — wraps pyserial, `send_command("PING")` with retry
-- **`ArmController`** — high-level poses: `go_home()`, `pick()`, `place()`
-- **`TurntableController`** — `rotate_degrees()`, `capture_rotation_set()`
-- **`CameraInterface`** — HTTP GET to ESP32 `/capture` and stream URL
+#### Camera not attached to the Pi
+`rpicam-hello --list-cameras` reports `No cameras available!`. The service runs degraded
+and `/status` returns 503. Once the ribbon is on, re-run `bash pi/scripts/install.sh`
+(without `AXUM_ALLOW_NO_CAMERA=1`) so the sensor check and verifier both run, then set
+`AXUM_LENS_FOCAL_MM` in `/etc/default/axum-pi-camera` and restart.
 
-All commands must match the protocol in `.cursorrules` and `arduino/axum_rover/axum_rover.ino`.
+#### Front nav camera never calibrated
+`scripts/calibrate_camera.py` has never been run. Until `data/calibration/front_intrinsics.json`
+exists, `NAVIGATE` fails on hardware **by design** — marker_nav can give a bearing but no
+range, and docking refuses to advance rather than drive an unknown distance. Note this is
+the **front USB webcam**, not the Pi IR-CUT module, which is the scan camera.
 
-#### `src/pipeline/main_pipeline.py`
-Expected exports (lazy-imported in `src/pipeline/__init__.py`):
-- **`MissionPipeline`** — runs the full loop for N artefacts
-- **`MissionState`** / **`SharedState`** — state dict the dashboard reads
-- Integration with `emit_event()` from dashboard
+#### Lighting never bench-tested
+`FIRMWARE_LED_READY = False` in `config.py` gates the photometric-stereo and multispectral
+stages. The scan stage in `main_pipeline.py` raises unconditionally until an aligned
+visible/IR capture source exists. Both guards are deliberate — do not remove them to make
+a demo run.
 
-**Pattern to follow:** `mesh_stage.py` shows how a pipeline stage wraps lower modules + catalogue updates.
+#### Nothing has ever moved
+The Mega firmware, `ArmController` and `TurntableController` are all written and
+unit-tested against fakes. No servo, stepper or motor has been driven by this software.
+Budget real time for the first bench session.
 
-### P1 — Planned but not blocking first integration
+### P1 — software, not blocking first integration
 
-- `src/imaging/photometric_stereo.py`
-- `src/imaging/multispectral.py`
-- `src/analysis/fragility_clock.py`
-- `src/sensing/acoustic_tap.py`
-- Full `src/intervention/`, `src/audio/`, `src/visualization/` packages
+- **Train CrackNet** — highest-value remaining AI task (see §6)
+- **Domain gap is unmeasured**: the 14,080 crack images are asphalt, concrete and lab
+  marble. The deployment domain is weathered Ethiopian stone with lichen — exactly what
+  the classical filter kept misreading as cracks. S2DS labels vegetation as its own class
+  and is the obvious lead.
+- **Meshroom has never run on our own photographs.** `scans/meshes/TEST-SCEAUX/` is the
+  openMVG benchmark set, not an AXUM capture.
+- Artefact classifier and both YOLO models are untrained; the classifier dataset is short.
+- `src/sensing/acoustic_tap.py`, `src/intervention/`, `src/audio/`, `src/visualization/`
+  are planned, not started.
 
 ---
 

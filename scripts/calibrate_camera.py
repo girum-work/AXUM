@@ -115,7 +115,7 @@ def make_grabber(camera: int | None, stream_url: str | None):
         from src.arm.controller import CameraInterface
 
         interface = CameraInterface(stream_url=stream_url)
-        return interface.capture_frame, lambda: None
+        return interface.capture_array, lambda: None
 
     stream = cv2.VideoCapture(camera if camera is not None else 0)
     if not stream.isOpened():
